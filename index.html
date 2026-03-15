@@ -107,8 +107,15 @@
     .map-well-count { top: 10px; right: 50px; background: rgba(10,14,20,0.92); padding: 5px 10px; border-radius: 4px; border: 1px solid var(--border); font-size: 10px; font-family: var(--font-mono); color: var(--text-dim); }
     
     /* Well detail */
-    .well-detail { width: 320px; max-height: 500px; overflow-y: auto; }
+    .well-detail { width: 400px; max-height: calc(100vh - 200px); overflow-y: auto; }
     .well-detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+    .accordion { border-top: 1px solid var(--border); margin-top: 10px; }
+    .accordion-header { display: flex; align-items: center; justify-content: space-between; padding: 8px 0; cursor: pointer; user-select: none; }
+    .accordion-header:hover { opacity: 0.8; }
+    .accordion-title { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; font-family: var(--font-mono); }
+    .accordion-arrow { font-size: 10px; color: var(--text-dim); transition: transform 0.2s; }
+    .accordion-body { display: none; padding-bottom: 8px; }
+    .accordion-body.open { display: block; }
     .well-field-label { font-size: 9px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px; font-family: var(--font-mono); }
     .well-field-value { font-size: 12px; font-weight: 600; font-family: var(--font-mono); color: var(--text); }
     
@@ -140,7 +147,7 @@
     @media (max-width: 900px) {
       .stats-bar { flex-wrap: wrap; }
       .stat-card { min-width: 100px; }
-      .well-detail { width: 100%; max-height: none; margin-top: 12px; }
+      .well-detail { width: 100%; max-height: none; margin-top: 12px; overflow-y: visible; }
       .flex.gap-16 { flex-direction: column; }
       #map-container { height: 400px; }
       .header-inner { flex-wrap: wrap; gap: 8px; }
@@ -1852,11 +1859,9 @@ function renderDetailPanel() {
   const container = document.querySelector(".well-detail");
   if (!container && !sw) return;
   
-  // Find the parent flex container that holds the map and detail panel
   const flexParent = document.querySelector("#map-container")?.parentElement?.parentElement;
   if (!flexParent) return;
   
-  // Remove existing detail panel
   const existing = flexParent.querySelector(".well-detail");
   if (existing) existing.remove();
   
@@ -1866,31 +1871,167 @@ function renderDetailPanel() {
   const rrcUrl = rrcLink(sw);
   const liveBadge = sw.isReal ? `<span style="display:inline-block;background:var(--green);color:#000;font-size:8px;font-weight:700;padding:2px 6px;border-radius:3px;font-family:var(--font-mono);letter-spacing:1px;margin-left:8px;vertical-align:middle">LIVE RRC</span>` : `<span style="display:inline-block;background:var(--text-muted);color:var(--bg);font-size:8px;font-weight:700;padding:2px 6px;border-radius:3px;font-family:var(--font-mono);letter-spacing:1px;margin-left:8px;vertical-align:middle">SYNTHETIC</span>`;
   
+  const g = gcs();
+  const rs = state.riskScores;
+  const mc = state.mcResults;
+  const colors5 = ["#ef4444","#f97316","#eab308","#84cc16","#22c55e"];
+  
+  // ── DCA mini section ──
+  const hasDCA = dcaState.prodData && dcaState.fits && dcaState.fits.length > 0;
+  const bestFit = hasDCA ? dcaState.fits[0] : null;
+  let dcaMiniChart = "";
+  if (hasDCA) {
+    const monthlyOil = dcaState.prodData.map(p => p.oil);
+    const maxR = Math.max(...monthlyOil) * 1.1;
+    const n = monthlyOil.length;
+    const cw2 = 360, ch2 = 100, p2 = { t: 8, r: 8, b: 8, l: 8 };
+    const w2 = cw2 - p2.l - p2.r, h2 = ch2 - p2.t - p2.b;
+    const dots = monthlyOil.map((q, t) => {
+      if (q <= 0) return "";
+      return `<circle cx="${p2.l + (t/(n-1))*w2}" cy="${p2.t + h2 - (q/maxR)*h2}" r="1.5" fill="#e2e8f0" opacity="0.6" />`;
+    }).join("");
+    const curvePts = [];
+    for (let t = 0; t < n * 1.3; t++) {
+      const q = bestFit.predict(t);
+      if (q < 1) break;
+      curvePts.push(`${p2.l + (t/(n*1.3))*w2},${p2.t + h2 - (Math.min(q,maxR)/maxR)*h2}`);
+    }
+    dcaMiniChart = `<svg viewBox="0 0 ${cw2} ${ch2}" style="width:100%;display:block;margin:6px 0">${dots}<polyline points="${curvePts.join(" ")}" fill="none" stroke="${bestFit.color}" stroke-width="1.5" /></svg>`;
+  }
+  
+  const dcaSection = `
+    <div class="accordion">
+      <div class="accordion-header" onclick="toggleAccordion('dca-body')">
+        <span class="accordion-title" style="color:var(--accent)">⟋ Decline Analysis</span>
+        <span class="accordion-arrow" id="dca-body-arrow">▸</span>
+      </div>
+      <div class="accordion-body" id="dca-body">
+        ${hasDCA ? `
+          ${dcaMiniChart}
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-bottom:6px">
+            <div style="background:var(--bg-input);border-radius:4px;padding:5px 7px"><div style="font-size:8px;color:var(--text-muted);font-family:var(--font-mono);text-transform:uppercase">Best Fit</div><div style="font-size:11px;font-weight:600;font-family:var(--font-mono);color:${bestFit.color}">${bestFit.type} (R²=${bestFit.r2.toFixed(2)})</div></div>
+            <div style="background:var(--bg-input);border-radius:4px;padding:5px 7px"><div style="font-size:8px;color:var(--text-muted);font-family:var(--font-mono);text-transform:uppercase">EUR</div><div style="font-size:11px;font-weight:600;font-family:var(--font-mono);color:var(--blue)">${bestFit.eur} MBO</div></div>
+            <div style="background:var(--bg-input);border-radius:4px;padding:5px 7px"><div style="font-size:8px;color:var(--text-muted);font-family:var(--font-mono);text-transform:uppercase">Decline</div><div style="font-size:11px;font-weight:600;font-family:var(--font-mono);color:var(--red)">${bestFit.DiAnnual.toFixed(1)}%/yr</div></div>
+            <div style="background:var(--bg-input);border-radius:4px;padding:5px 7px"><div style="font-size:8px;color:var(--text-muted);font-family:var(--font-mono);text-transform:uppercase">Data</div><div style="font-size:11px;font-weight:600;font-family:var(--font-mono)">${dcaState.prodData.length} mo</div></div>
+          </div>
+          <button class="btn btn-cyan" style="width:100%;font-size:9px;padding:5px" onclick="runDCAAnalysis(state.selectedWell,dcaState.prodData,dcaState.fits)" ${dcaState.analyzing?'disabled':''}>${dcaState.analyzing?'⏳ Analyzing...':'🧠 AI Interpret Decline'}</button>
+          ${dcaState.aiAnalysis ? `<div style="margin-top:6px;font-size:10px;color:var(--text);font-family:var(--font-mono);line-height:1.6;max-height:200px;overflow-y:auto;white-space:pre-wrap;background:var(--bg-input);border-radius:6px;padding:8px">${dcaState.aiAnalysis}</div>` : ''}
+        ` : sw.isReal && sw.leaseNumber ? `
+          <button class="btn btn-primary" style="width:100%;font-size:9px;padding:5px" onclick="(async()=>{dcaState.prodData=await loadDCAData(state.selectedWell);if(dcaState.prodData){dcaState.fits=runDCAFits(dcaState.prodData);}renderDetailPanel()})()">▸ Load Production & Fit Curves</button>
+        ` : `<div style="font-size:10px;color:var(--text-dim);font-family:var(--font-mono)">Select a real RRC well to analyze</div>`}
+      </div>
+    </div>`;
+  
+  // ── Risk mini section ──
+  const riskSection = `
+    <div class="accordion">
+      <div class="accordion-header" onclick="toggleAccordion('risk-body')">
+        <span class="accordion-title" style="color:var(--purple)">◈ Risk Assessment — ${g.toFixed(1)}% GCS</span>
+        <span class="accordion-arrow" id="risk-body-arrow">▸</span>
+      </div>
+      <div class="accordion-body" id="risk-body">
+        ${Object.entries(rs).map(([k, v]) => `
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:3px 0;font-size:10px;font-family:var(--font-mono)">
+            <span style="color:var(--text);text-transform:capitalize;width:70px">${k}</span>
+            <div style="display:flex;gap:2px">${[1,2,3,4,5].map(i => `<div style="width:16px;height:5px;border-radius:2px;background:${i<=v?colors5[v-1]:'var(--border)'}cursor:pointer" onclick="state.riskScores.${k}=${i};renderDetailPanel()"></div>`).join("")}</div>
+            <span style="color:${colors5[v-1]};font-weight:600;width:30px;text-align:right">${v*20}%</span>
+          </div>
+        `).join("")}
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-top:6px;padding:6px 8px;background:var(--bg-input);border-radius:6px">
+          <span style="font-size:9px;color:var(--text-dim);font-family:var(--font-mono);text-transform:uppercase">GCS</span>
+          <span style="font-size:16px;font-weight:700;font-family:var(--font-mono);color:${g>10?'var(--green)':g>3?'var(--accent)':'var(--red)'}">${g.toFixed(1)}%</span>
+        </div>
+      </div>
+    </div>`;
+  
+  // ── Economics mini section ──
+  const econSection = `
+    <div class="accordion">
+      <div class="accordion-header" onclick="toggleAccordion('econ-body')">
+        <span class="accordion-title" style="color:var(--blue)">$ Economics ${mc ? (mc.posNPV > 60 && mc.p50.npv > 0 ? '— ✓ DRILL' : '— ✗ PASS') : ''}</span>
+        <span class="accordion-arrow" id="econ-body-arrow">▸</span>
+      </div>
+      <div class="accordion-body" id="econ-body">
+        ${mc ? `
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-bottom:6px">
+            <div style="background:var(--bg-input);border-radius:4px;padding:5px 7px"><div style="font-size:8px;color:var(--text-muted);font-family:var(--font-mono);text-transform:uppercase">P50 NPV</div><div style="font-size:11px;font-weight:600;font-family:var(--font-mono);color:${mc.p50.npv>0?'var(--green)':'var(--red)'}">$${(mc.p50.npv/1e6).toFixed(2)}M</div></div>
+            <div style="background:var(--bg-input);border-radius:4px;padding:5px 7px"><div style="font-size:8px;color:var(--text-muted);font-family:var(--font-mono);text-transform:uppercase">P(NPV>0)</div><div style="font-size:11px;font-weight:600;font-family:var(--font-mono);color:${mc.posNPV>60?'var(--green)':'var(--red)'}">${mc.posNPV.toFixed(0)}%</div></div>
+            <div style="background:var(--bg-input);border-radius:4px;padding:5px 7px"><div style="font-size:8px;color:var(--text-muted);font-family:var(--font-mono);text-transform:uppercase">Mean EUR</div><div style="font-size:11px;font-weight:600;font-family:var(--font-mono)">${mc.mean.eur?.toFixed(0)||'—'} MBO</div></div>
+            <div style="background:var(--bg-input);border-radius:4px;padding:5px 7px"><div style="font-size:8px;color:var(--text-muted);font-family:var(--font-mono);text-transform:uppercase">Payout</div><div style="font-size:11px;font-weight:600;font-family:var(--font-mono)">${mc.mean.payout?.toFixed(0)||'—'} mo</div></div>
+          </div>
+          <div style="text-align:center;padding:4px;background:${mc.posNPV>60&&mc.p50.npv>0?'var(--green)':'var(--red)'}15;border-radius:4px;font-size:12px;font-weight:700;font-family:var(--font-mono);color:${mc.posNPV>60&&mc.p50.npv>0?'var(--green)':'var(--red)'}">${mc.posNPV>60&&mc.p50.npv>0?'✓ DRILL':'✗ PASS'}</div>
+        ` : `
+          <div style="font-size:10px;color:var(--text-dim);font-family:var(--font-mono);margin-bottom:6px">Run Monte Carlo on Economics tab</div>
+          <button class="btn" style="width:100%;font-size:9px;padding:5px" onclick="setTab('economics')">Open Economics →</button>
+        `}
+      </div>
+    </div>`;
+  
+  // ── AI Quick Ask ──
+  const aiSection = `
+    <div class="accordion">
+      <div class="accordion-header" onclick="toggleAccordion('ai-body')">
+        <span class="accordion-title" style="color:var(--cyan)">◉ AI Quick Ask</span>
+        <span class="accordion-arrow" id="ai-body-arrow">▸</span>
+      </div>
+      <div class="accordion-body" id="ai-body">
+        <div style="display:flex;gap:4px;margin-bottom:6px;flex-wrap:wrap">
+          ${[
+            ["Evaluate","Evaluate this prospect using the 5-factor risk framework. Grade it, top risks, analog fields, next steps."],
+            ["Recompletion?","Are there behind-pipe recompletion opportunities for this well? What would the workover cost vs incremental production look like?"],
+            ["Compare area","Compare the producing formations in this area. Which has the best risk-adjusted economics for a new drill?"]
+          ].map(([label, msg]) => `<button style="font-size:8px;font-family:var(--font-mono);background:var(--bg-input);border:1px solid var(--border);color:var(--text-dim);padding:3px 6px;border-radius:3px;cursor:pointer" onclick="setTab('ai');setTimeout(()=>sendAIMessage('${msg.replace(/'/g,"\\'")}'),100)">${label}</button>`).join("")}
+        </div>
+        <div style="display:flex;gap:4px">
+          <input type="text" id="panel-ai-input" placeholder="Ask about this well..." style="flex:1;font-size:10px;padding:5px 7px" onkeydown="if(event.key==='Enter'){setTab('ai');setTimeout(()=>sendAIMessage(this.value),100);this.value='';}" />
+          <button class="btn btn-cyan" style="font-size:9px;padding:4px 8px" onclick="setTab('ai');setTimeout(()=>sendAIMessage(document.getElementById('panel-ai-input').value),100);document.getElementById('panel-ai-input').value=''">Ask</button>
+        </div>
+      </div>
+    </div>`;
+  
+  // ── Offsets section ──
+  const offsets = state.wells.filter(w=>w.id!==sw.id).map(w=>({...w,d:Math.hypot(w.lng-sw.lng,w.lat-sw.lat)})).sort((a,b)=>a.d-b.d).slice(0,4);
+  
   const detailDiv = document.createElement("div");
   detailDiv.className = "well-detail card";
   detailDiv.innerHTML = `
     <div style="font-size:14px;font-weight:700;color:var(--accent);margin-bottom:3px">${sw.lease}${liveBadge}</div>
     <div style="font-size:11px;color:var(--text-dim);font-family:var(--font-mono);margin-bottom:4px">API# ${sw.id}</div>
-    <a href="${rrcUrl}" target="_blank" rel="noopener" style="display:inline-block;margin-bottom:12px;font-size:10px;font-family:var(--font-mono);color:var(--cyan);text-decoration:none;border:1px solid var(--cyan);padding:3px 8px;border-radius:4px">↗ View on Texas RRC</a>
-    <div class="well-detail-grid" style="margin-bottom:14px">
+    <a href="${rrcUrl}" target="_blank" rel="noopener" style="display:inline-block;margin-bottom:10px;font-size:10px;font-family:var(--font-mono);color:var(--cyan);text-decoration:none;border:1px solid var(--cyan);padding:3px 8px;border-radius:4px">↗ View on Texas RRC</a>
+    <div class="well-detail-grid" style="margin-bottom:10px">
       ${[["Formation",sw.formation],["County",sw.county+" Co."],["Operator",sw.operator],["Status",`<span style="color:${sw.status==='producing'?'var(--green)':sw.status==='shut-in'?'var(--accent)':'var(--red)'}">${sw.status.toUpperCase()}</span>`],["IP Rate",sw.ip+" bbl/d"],["Depth",sw.depth.toLocaleString()+" ft"],["Spud Year",sw.year],["Cum Oil",(sw.cumOil/1000).toFixed(0)+" MBO"]].map(([k,v]) => `<div><div class="well-field-label">${k}</div><div class="well-field-value">${v}</div></div>`).join("")}
     </div>
-    <div style="font-size:10px;color:var(--text-dim);font-family:var(--font-mono);margin-bottom:6px">PRODUCTION (60 mo)</div>
-    <svg viewBox="0 0 288 60" style="width:100%;display:block">${miniChartPath(sw.months, 288, 60, "#34d399")}</svg>
-    <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border)">
-      <div style="font-size:10px;color:var(--text-dim);font-family:var(--font-mono);margin-bottom:5px">PROSPECT NOTES</div>
-      <textarea id="prospect-note-input" placeholder="Add evaluation notes..." onblur="saveNote('${sw.id}')" style="width:100%;min-height:55px;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:7px;border-radius:4px;font-size:11px;font-family:var(--font-mono);resize:vertical;outline:none">${noteText}</textarea>
+    <div style="font-size:9px;color:var(--text-muted);font-family:var(--font-mono);margin-bottom:4px">PRODUCTION (${sw.months?.length || 0} mo)</div>
+    <svg viewBox="0 0 360 50" style="width:100%;display:block">${miniChartPath(sw.months, 360, 50, "#34d399")}</svg>
+    
+    ${dcaSection}
+    ${riskSection}
+    ${econSection}
+    ${aiSection}
+    
+    <div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--border)">
+      <div style="font-size:9px;color:var(--text-muted);font-family:var(--font-mono);margin-bottom:4px">NEAREST OFFSETS</div>
+      ${offsets.map(w=>`<div style="display:flex;justify-content:space-between;padding:3px 0;font-size:10px;font-family:var(--font-mono);cursor:pointer;border-bottom:1px solid var(--border)" onclick="dcaState.prodData=null;dcaState.fits=null;dcaState.aiAnalysis=null;state.selectedWell=state.wells.find(x=>x.id==='${w.id}');renderDetailPanel()"><span style="color:var(--text)">${w.formation} | ${w.county}</span><span style="color:var(--green)">${w.ip} bbl/d</span></div>`).join("")}
     </div>
-    <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border)">
-      <div style="font-size:10px;color:var(--text-dim);font-family:var(--font-mono);margin-bottom:4px">NEAREST OFFSETS</div>
-      ${state.wells.filter(w=>w.id!==sw.id).map(w=>({...w,d:Math.hypot(w.lng-sw.lng,w.lat-sw.lat)})).sort((a,b)=>a.d-b.d).slice(0,4).map(w=>`<div style="display:flex;justify-content:space-between;padding:3px 0;font-size:10px;font-family:var(--font-mono);cursor:pointer;border-bottom:1px solid var(--border)" onclick="state.selectedWell=state.wells.find(x=>x.id==='${w.id}');renderDetailPanel()"><span style="color:var(--text)">${w.formation} | ${w.county}</span><span style="color:var(--green)">${w.ip} bbl/d</span></div>`).join("")}
+    <div style="margin-top:8px;padding-top:6px;border-top:1px solid var(--border)">
+      <div style="font-size:9px;color:var(--text-muted);font-family:var(--font-mono);margin-bottom:4px">PROSPECT NOTES</div>
+      <textarea id="prospect-note-input" placeholder="Add notes..." onblur="saveNote('${sw.id}')" style="width:100%;min-height:40px;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:6px;border-radius:4px;font-size:10px;font-family:var(--font-mono);resize:vertical;outline:none">${noteText}</textarea>
     </div>
-    <div style="display:flex;gap:6px;margin-top:10px">
-      <button onclick="exportProspect('${sw.id}')" style="flex:1;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:6px;font-size:10px;font-weight:700;cursor:pointer;font-family:var(--font-mono)">↓ TXT</button>
-      <button onclick="exportProspectPDF('${sw.id}')" style="flex:2;background:linear-gradient(135deg,var(--accent),#c97b1c);border:none;color:#000;padding:8px;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer;font-family:var(--font-mono);letter-spacing:0.5px">⬇ EXPORT PDF REPORT</button>
+    <div style="display:flex;gap:6px;margin-top:8px">
+      <button onclick="exportProspect('${sw.id}')" style="flex:1;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:6px;border-radius:6px;font-size:9px;font-weight:700;cursor:pointer;font-family:var(--font-mono)">↓ TXT</button>
+      <button onclick="exportProspectPDF('${sw.id}')" style="flex:2;background:linear-gradient(135deg,var(--accent),#c97b1c);border:none;color:#000;padding:6px;border-radius:6px;font-size:10px;font-weight:700;cursor:pointer;font-family:var(--font-mono);letter-spacing:0.5px">⬇ PDF REPORT</button>
     </div>
   `;
   flexParent.appendChild(detailDiv);
+}
+
+function toggleAccordion(id) {
+  const body = document.getElementById(id);
+  const arrow = document.getElementById(id + '-arrow');
+  if (!body) return;
+  const isOpen = body.classList.contains('open');
+  body.classList.toggle('open');
+  if (arrow) arrow.textContent = isOpen ? '▸' : '▾';
 }
 function applyMapboxToken() {
   state.mapboxToken = document.getElementById("mb-token")?.value?.trim() || "";

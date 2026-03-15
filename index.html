@@ -911,6 +911,7 @@ function renderMarkers() {
     marker.on("click", async (e) => {
       L.DomEvent.stopPropagation(e);
       state.selectedWell = well;
+      dcaState.prodData = null; dcaState.fits = null; dcaState.aiAnalysis = null; dcaState.typeCurveData = null;
       // Only update the detail panel, not the whole map
       renderDetailPanel();
       // If real well with lease, fetch production history
@@ -1915,66 +1916,441 @@ function miniChartPath(data, w, h, color) {
 }
 
 // ============ DECLINE TAB ============
+// ============ DECLINE CURVE ANALYSIS ENGINE ============
+
+// Curve fitting models
+function fitExponential(rates) {
+  // q(t) = qi * exp(-Di * t)
+  // Linearize: ln(q) = ln(qi) - Di*t
+  const n = rates.length;
+  if (n < 3) return null;
+  let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0, validN = 0;
+  rates.forEach((q, t) => {
+    if (q <= 0) return;
+    const lnQ = Math.log(q);
+    sumX += t; sumY += lnQ; sumXY += t * lnQ; sumX2 += t * t; validN++;
+  });
+  if (validN < 3) return null;
+  const slope = (validN * sumXY - sumX * sumY) / (validN * sumX2 - sumX * sumX);
+  const intercept = (sumY - slope * sumX) / validN;
+  const qi = Math.exp(intercept);
+  const Di = -slope; // monthly decline rate
+  if (Di <= 0 || qi <= 0) return null;
+  const predict = (t) => qi * Math.exp(-Di * t);
+  // EUR: integrate to economic limit (5 bbl/mo)
+  let eur = 0;
+  for (let t = 0; t < 600; t++) { const q = predict(t); if (q < 5) break; eur += q; }
+  // R² calculation
+  const meanY = rates.filter(q => q > 0).reduce((s, v) => s + Math.log(v), 0) / validN;
+  let ssTot = 0, ssRes = 0;
+  rates.forEach((q, t) => { if (q <= 0) return; const lnQ = Math.log(q); ssTot += (lnQ - meanY) ** 2; ssRes += (lnQ - (intercept + slope * t)) ** 2; });
+  const r2 = 1 - ssRes / (ssTot || 1);
+  return { type: "Exponential", qi: Math.round(qi), Di: Di, DiAnnual: (1 - Math.exp(-Di * 12)) * 100, eur: Math.round(eur / 1000), r2, predict, color: "#e8a838" };
+}
+
+function fitHyperbolic(rates) {
+  // q(t) = qi / (1 + b*Di*t)^(1/b)
+  // Try b values from 0.1 to 2.0 and pick best fit
+  const n = rates.length;
+  if (n < 6) return null;
+  let bestFit = null, bestR2 = -Infinity;
+  for (let b = 0.1; b <= 2.0; b += 0.1) {
+    // For each b, linearize: q^(-b) = qi^(-b) + (b*Di/qi^b)*t ... use numerical approach
+    // Simpler: use first and mid-point to estimate qi and Di, then score
+    const q0 = rates.find(q => q > 0) || rates[0];
+    const midIdx = Math.floor(n / 2);
+    const qMid = rates[midIdx] || q0 / 2;
+    if (q0 <= 0 || qMid <= 0 || qMid >= q0) continue;
+    const ratio = (q0 / qMid);
+    const denom = midIdx * b;
+    if (denom <= 0) continue;
+    const Di = (Math.pow(ratio, b) - 1) / denom;
+    if (Di <= 0) continue;
+    const qi = q0;
+    const predict = (t) => qi / Math.pow(1 + b * Di * t, 1 / b);
+    // R²
+    const actuals = rates.filter(q => q > 0);
+    const meanQ = actuals.reduce((s, v) => s + v, 0) / actuals.length;
+    let ssTot = 0, ssRes = 0;
+    rates.forEach((q, t) => { if (q <= 0) return; const pred = predict(t); ssTot += (q - meanQ) ** 2; ssRes += (q - pred) ** 2; });
+    const r2 = 1 - ssRes / (ssTot || 1);
+    if (r2 > bestR2) { bestR2 = r2; bestFit = { type: "Hyperbolic", qi: Math.round(qi), Di, DiAnnual: Di * 12 * 100, b: Math.round(b * 10) / 10, r2, predict, color: "#34d399" }; }
+  }
+  if (bestFit) {
+    let eur = 0;
+    for (let t = 0; t < 600; t++) { const q = bestFit.predict(t); if (q < 5) break; eur += q; }
+    bestFit.eur = Math.round(eur / 1000);
+  }
+  return bestFit;
+}
+
+function fitHarmonic(rates) {
+  // q(t) = qi / (1 + Di*t)  — special case of hyperbolic where b=1
+  const n = rates.length;
+  if (n < 3) return null;
+  const q0 = rates.find(q => q > 0) || rates[0];
+  const lastIdx = n - 1;
+  const qLast = rates[lastIdx];
+  if (q0 <= 0 || qLast <= 0 || qLast >= q0) return null;
+  const Di = (q0 / qLast - 1) / lastIdx;
+  if (Di <= 0) return null;
+  const qi = q0;
+  const predict = (t) => qi / (1 + Di * t);
+  const actuals = rates.filter(q => q > 0);
+  const meanQ = actuals.reduce((s, v) => s + v, 0) / actuals.length;
+  let ssTot = 0, ssRes = 0;
+  rates.forEach((q, t) => { if (q <= 0) return; const pred = predict(t); ssTot += (q - meanQ) ** 2; ssRes += (q - pred) ** 2; });
+  const r2 = 1 - ssRes / (ssTot || 1);
+  let eur = 0;
+  for (let t = 0; t < 600; t++) { const q = predict(t); if (q < 5) break; eur += q; }
+  return { type: "Harmonic", qi: Math.round(qi), Di, DiAnnual: Di * 12 * 100, b: 1.0, r2, predict, eur: Math.round(eur / 1000), color: "#c084fc" };
+}
+
+// DCA state
+let dcaState = { prodData: null, fits: null, aiAnalysis: null, analyzing: false, typeCurveData: null, generatingTypeCurve: false };
+
+async function loadDCAData(well) {
+  if (!well || !well.leaseNumber || dataSource !== "supabase") return null;
+  const prod = await loadSupabaseProduction(well.leaseNumber, well.wellType);
+  if (!prod || prod.length < 6) return null;
+  return prod.map(p => ({
+    year: p.report_year,
+    month: p.report_month,
+    oil: parseFloat(p.oil_bbls) || 0,
+    gas: parseFloat(p.gas_mcf) || 0,
+    days: p.days_produced || 30,
+    rate: (parseFloat(p.oil_bbls) || 0) / (p.days_produced || 30), // daily rate
+  }));
+}
+
+function runDCAFits(prodData) {
+  if (!prodData || prodData.length < 6) return null;
+  const monthlyRates = prodData.map(p => p.oil); // monthly bbls
+  const fits = [fitExponential(monthlyRates), fitHyperbolic(monthlyRates), fitHarmonic(monthlyRates)].filter(Boolean);
+  fits.sort((a, b) => b.r2 - a.r2); // best fit first
+  return fits;
+}
+
+async function runDCAAnalysis(well, prodData, fits) {
+  if (dcaState.analyzing) return;
+  dcaState.analyzing = true;
+  dcaState.aiAnalysis = null;
+  renderDeclineTab(document.getElementById("main-content"));
+  
+  const bestFit = fits[0];
+  const monthlyOil = prodData.map(p => p.oil);
+  const firstHalf = monthlyOil.slice(0, Math.floor(monthlyOil.length / 2));
+  const secondHalf = monthlyOil.slice(Math.floor(monthlyOil.length / 2));
+  const avgFirst = firstHalf.reduce((s, v) => s + v, 0) / firstHalf.length;
+  const avgSecond = secondHalf.reduce((s, v) => s + v, 0) / secondHalf.length;
+  const trend = avgSecond > avgFirst * 1.1 ? "INCREASING" : avgSecond < avgFirst * 0.7 ? "DECLINING" : "FLAT";
+  
+  // Check for production anomalies (workovers, waterfloods)
+  const spikes = [];
+  for (let i = 3; i < monthlyOil.length; i++) {
+    const prev3Avg = (monthlyOil[i-1] + monthlyOil[i-2] + monthlyOil[i-3]) / 3;
+    if (prev3Avg > 0 && monthlyOil[i] > prev3Avg * 2) {
+      spikes.push({ month: i, year: prodData[i].year, mo: prodData[i].month, rate: monthlyOil[i], prevAvg: Math.round(prev3Avg) });
+    }
+  }
+  
+  const prompt = `Analyze this well's production decline behavior. Be specific and quantitative.
+
+WELL: ${well.lease} (API# ${well.id})
+Formation: ${well.formation} | County: ${well.county} Co. | Operator: ${well.operator}
+Depth: ${well.depth?.toLocaleString() || "unknown"} ft | Status: ${well.status}
+
+PRODUCTION DATA: ${prodData.length} months (${prodData[0].year}/${prodData[0].month} to ${prodData[prodData.length-1].year}/${prodData[prodData.length-1].month})
+Total cumulative oil: ${Math.round(monthlyOil.reduce((s,v)=>s+v,0)/1000)} MBO
+Production trend: ${trend} (first-half avg: ${Math.round(avgFirst)} bbl/mo, second-half avg: ${Math.round(avgSecond)} bbl/mo)
+${spikes.length > 0 ? "Production spikes detected at: " + spikes.map(s => `${s.year}/${s.mo} (${s.rate} bbl vs ${s.prevAvg} avg)`).join(", ") : "No major production spikes detected"}
+
+CURVE FITS:
+${fits.map(f => `${f.type}: qi=${f.qi} bbl/mo, Di=${f.DiAnnual.toFixed(1)}%/yr${f.b !== undefined ? ', b='+f.b : ''}, EUR=${f.eur} MBO, R²=${f.r2.toFixed(3)}`).join("\n")}
+Best fit: ${bestFit.type} (R²=${bestFit.r2.toFixed(3)})
+
+TASKS:
+1. Interpret WHY the production behaves this way geologically (waterflood response? natural depletion? workover? formation-specific behavior?)
+2. Is the best-fit model appropriate, or does the production pattern suggest something the models can't capture?
+3. What are the remaining recoverable reserves based on the decline analysis?
+4. Is this well a recompletion or workover candidate? Why or why not?
+5. Rate the confidence of the EUR estimate: HIGH / MEDIUM / LOW and explain why.`;
+
+  try {
+    const resp = await fetch(AI_PROXY_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 1500,
+        system: AI_SYSTEM_PROMPT,
+        messages: [{ role: "user", content: prompt }],
+      }),
+    });
+    const data = await resp.json();
+    dcaState.aiAnalysis = data.content?.filter(c => c.type === "text").map(c => c.text).join("\n") || "Analysis failed.";
+  } catch (e) {
+    dcaState.aiAnalysis = "Error: " + e.message;
+  }
+  dcaState.analyzing = false;
+  renderDeclineTab(document.getElementById("main-content"));
+}
+
+async function generateTypeCurve() {
+  if (dcaState.generatingTypeCurve) return;
+  dcaState.generatingTypeCurve = true;
+  renderDeclineTab(document.getElementById("main-content"));
+  
+  const well = state.selectedWell;
+  const targetFm = well?.formation || "Unknown";
+  const targetCounty = well?.county || "Unknown";
+  
+  // Find all wells with same formation in same county that have production data
+  const matchingWells = state.wells.filter(w => 
+    w.formation === targetFm && w.county === targetCounty && w.leaseNumber && w.isReal
+  ).slice(0, 20); // Cap at 20 for performance
+  
+  if (matchingWells.length < 3) {
+    dcaState.typeCurveData = { error: `Only ${matchingWells.length} wells found for ${targetFm} in ${targetCounty} Co. Need at least 3.` };
+    dcaState.generatingTypeCurve = false;
+    renderDeclineTab(document.getElementById("main-content"));
+    return;
+  }
+  
+  // Load production for each well and normalize to months-from-first-production
+  const allCurves = [];
+  for (const w of matchingWells.slice(0, 15)) {
+    const prod = await loadSupabaseProduction(w.leaseNumber, w.wellType);
+    if (!prod || prod.length < 6) continue;
+    const oilMonths = prod.map(p => parseFloat(p.oil_bbls) || 0).filter(v => v > 0);
+    if (oilMonths.length < 6) continue;
+    allCurves.push(oilMonths);
+  }
+  
+  if (allCurves.length < 3) {
+    dcaState.typeCurveData = { error: `Only ${allCurves.length} wells had sufficient production data.` };
+    dcaState.generatingTypeCurve = false;
+    renderDeclineTab(document.getElementById("main-content"));
+    return;
+  }
+  
+  // Build P10/P50/P90 type curve (normalize to 60 months max)
+  const maxMonths = 60;
+  const p10 = [], p50 = [], p90 = [], avg = [];
+  for (let m = 0; m < maxMonths; m++) {
+    const vals = allCurves.map(c => c[m] || 0).filter(v => v > 0).sort((a, b) => a - b);
+    if (vals.length < 2) break;
+    p10.push(vals[Math.floor(vals.length * 0.1)] || vals[0]);
+    p50.push(vals[Math.floor(vals.length * 0.5)]);
+    p90.push(vals[Math.floor(vals.length * 0.9)] || vals[vals.length - 1]);
+    avg.push(vals.reduce((s, v) => s + v, 0) / vals.length);
+  }
+  
+  dcaState.typeCurveData = { formation: targetFm, county: targetCounty, wellCount: allCurves.length, p10, p50, p90, avg, months: p50.length };
+  dcaState.generatingTypeCurve = false;
+  renderDeclineTab(document.getElementById("main-content"));
+}
+
 function renderDeclineTab(el) {
   const well = state.selectedWell;
-  const ip = well?.ip || 500;
-  const decline = well?.decline || 0.5;
+  const hasProdData = dcaState.prodData && dcaState.prodData.length > 0;
+  const fits = dcaState.fits;
+  const bestFit = fits && fits.length > 0 ? fits[0] : null;
   
-  // Generate curve
-  const data = []; let cumSum = 0;
-  for (let m = 0; m < 120; m++) {
-    const rate = ip * Math.exp(-decline * m / 12);
-    cumSum += rate * 30;
-    data.push({ month: m, rate, cum: cumSum / 1000 });
-  }
-  const maxR = Math.max(...data.map(d => d.rate));
-  const maxC = Math.max(...data.map(d => d.cum));
-  const pad = { t: 20, r: 60, b: 30, l: 60 };
-  const cw = 560, ch = 240;
+  // Chart dimensions
+  const pad = { t: 20, r: 16, b: 30, l: 55 };
+  const cw = 600, ch = 260;
   const w = cw - pad.l - pad.r, h = ch - pad.t - pad.b;
   
-  const ratePts = data.map(d => `${pad.l+(d.month/119)*w},${pad.t+h-(d.rate/maxR)*h}`).join(" ");
-  const cumPts = data.map(d => `${pad.l+(d.month/119)*w},${pad.t+h-(d.cum/maxC)*h}`).join(" ");
+  let chartSVG = "";
+  let statCards = "";
   
-  const grid = [0,0.25,0.5,0.75,1].map(f => `
-    <line x1="${pad.l}" y1="${pad.t+h*(1-f)}" x2="${cw-pad.r}" y2="${pad.t+h*(1-f)}" stroke="#1a2332" stroke-dasharray="2,4" />
-    <text x="${pad.l-8}" y="${pad.t+h*(1-f)+4}" fill="#64748b" font-size="9" text-anchor="end" font-family="var(--font-mono)">${Math.round(maxR*f)}</text>
-    <text x="${cw-pad.r+8}" y="${pad.t+h*(1-f)+4}" fill="#60a5fa" font-size="9" font-family="var(--font-mono)">${(maxC*f).toFixed(0)}k</text>
-  `).join("");
+  if (hasProdData && fits && fits.length > 0) {
+    const prodData = dcaState.prodData;
+    const monthlyOil = prodData.map(p => p.oil);
+    const maxRate = Math.max(...monthlyOil) * 1.1;
+    const nMonths = monthlyOil.length;
+    
+    // Grid lines
+    const gridSteps = 5;
+    let gridSVG = "";
+    for (let i = 0; i <= gridSteps; i++) {
+      const f = i / gridSteps;
+      const y = pad.t + h * (1 - f);
+      gridSVG += `<line x1="${pad.l}" y1="${y}" x2="${cw-pad.r}" y2="${y}" stroke="#1a2332" stroke-dasharray="2,4" />`;
+      gridSVG += `<text x="${pad.l-6}" y="${y+3}" fill="#64748b" font-size="8" text-anchor="end" font-family="var(--font-mono)">${Math.round(maxRate*f)}</text>`;
+    }
+    
+    // Actual production scatter dots
+    const scatterDots = monthlyOil.map((q, t) => {
+      if (q <= 0) return "";
+      const x = pad.l + (t / (nMonths - 1)) * w;
+      const y = pad.t + h - (q / maxRate) * h;
+      return `<circle cx="${x}" cy="${y}" r="2.5" fill="#e2e8f0" opacity="0.7" />`;
+    }).join("");
+    
+    // Forecast curves (extend 50% beyond actual data)
+    const forecastMonths = Math.floor(nMonths * 1.5);
+    const curveSVGs = fits.map(fit => {
+      const pts = [];
+      for (let t = 0; t < forecastMonths; t++) {
+        const q = fit.predict(t);
+        if (q < 1 || q > maxRate * 2) continue;
+        const x = pad.l + (t / (forecastMonths - 1)) * w;
+        const y = pad.t + h - (Math.min(q, maxRate) / maxRate) * h;
+        pts.push(`${x},${y}`);
+      }
+      const dashStyle = fit === bestFit ? "" : 'stroke-dasharray="4,3"';
+      const strokeW = fit === bestFit ? "2" : "1.2";
+      return `<polyline points="${pts.join(" ")}" fill="none" stroke="${fit.color}" stroke-width="${strokeW}" ${dashStyle} opacity="${fit === bestFit ? 1 : 0.6}" />`;
+    }).join("");
+    
+    // Vertical line separating actual from forecast
+    const actualEndX = pad.l + ((nMonths - 1) / (forecastMonths - 1)) * w;
+    const forecastLine = `<line x1="${actualEndX}" y1="${pad.t}" x2="${actualEndX}" y2="${pad.t+h}" stroke="var(--text-muted)" stroke-width="0.5" stroke-dasharray="3,3" />
+      <text x="${actualEndX+4}" y="${pad.t+10}" fill="var(--text-muted)" font-size="8" font-family="var(--font-mono)">forecast →</text>`;
+    
+    // Time axis labels
+    const firstYear = prodData[0].year;
+    const lastYear = prodData[prodData.length - 1].year;
+    
+    chartSVG = `
+      <svg viewBox="0 0 ${cw} ${ch}" class="chart-svg">
+        ${gridSVG}
+        ${scatterDots}
+        ${curveSVGs}
+        ${forecastLine}
+        <text x="${pad.l}" y="${ch-4}" fill="#64748b" font-size="8" font-family="var(--font-mono)">${firstYear}</text>
+        <text x="${cw-pad.r}" y="${ch-4}" fill="#64748b" font-size="8" text-anchor="end" font-family="var(--font-mono)">${lastYear}+</text>
+        <text x="${pad.l}" y="12" fill="#e2e8f0" font-size="8" font-family="var(--font-mono)">● Actual (bbl/mo)</text>
+        ${fits.map((f, i) => `<text x="${pad.l + 120 + i*120}" y="12" fill="${f.color}" font-size="8" font-family="var(--font-mono)">${f === bestFit ? "▬" : "┄"} ${f.type}</text>`).join("")}
+      </svg>`;
+    
+    statCards = `
+      <div class="flex gap-12" style="margin-top:10px">
+        <div class="stat-card"><div class="stat-label">Best Fit</div><div class="stat-value" style="color:${bestFit.color};font-size:14px">${bestFit.type}</div><div class="stat-sub">R² = ${bestFit.r2.toFixed(3)}</div></div>
+        <div class="stat-card"><div class="stat-label">IP Rate</div><div class="stat-value" style="color:var(--green)">${bestFit.qi}<span class="stat-unit">bbl/mo</span></div></div>
+        <div class="stat-card"><div class="stat-label">Di (annual)</div><div class="stat-value" style="color:var(--red)">${bestFit.DiAnnual.toFixed(1)}<span class="stat-unit">%</span></div></div>
+        <div class="stat-card"><div class="stat-label">EUR (best fit)</div><div class="stat-value" style="color:var(--blue)">${bestFit.eur}<span class="stat-unit">MBO</span></div></div>
+        <div class="stat-card"><div class="stat-label">Data Points</div><div class="stat-value" style="color:var(--text)">${dcaState.prodData.length}<span class="stat-unit">mo</span></div></div>
+      </div>`;
+  } else {
+    // Fallback — synthetic curve (original behavior)
+    const ip = well?.ip || 500;
+    const decline = well?.decline || 0.5;
+    const data = []; let cumSum = 0;
+    for (let m = 0; m < 120; m++) { const rate = ip * Math.exp(-decline * m / 12); cumSum += rate * 30; data.push({ month: m, rate, cum: cumSum / 1000 }); }
+    const maxR = Math.max(...data.map(d => d.rate));
+    const ratePts = data.map(d => `${pad.l+(d.month/119)*w},${pad.t+h-(d.rate/maxR)*h}`).join(" ");
+    const grid = [0,0.25,0.5,0.75,1].map(f => `
+      <line x1="${pad.l}" y1="${pad.t+h*(1-f)}" x2="${cw-pad.r}" y2="${pad.t+h*(1-f)}" stroke="#1a2332" stroke-dasharray="2,4" />
+      <text x="${pad.l-6}" y="${pad.t+h*(1-f)+3}" fill="#64748b" font-size="8" text-anchor="end" font-family="var(--font-mono)">${Math.round(maxR*f)}</text>
+    `).join("");
+    chartSVG = `<svg viewBox="0 0 ${cw} ${ch}" class="chart-svg">
+      <defs><linearGradient id="rg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#e8a838" stop-opacity="0.3"/><stop offset="100%" stop-color="#e8a838" stop-opacity="0"/></linearGradient></defs>
+      ${grid}
+      <polygon points="${pad.l},${pad.t+h} ${ratePts} ${pad.l+w},${pad.t+h}" fill="url(#rg)" />
+      <polyline points="${ratePts}" fill="none" stroke="#e8a838" stroke-width="2" />
+    </svg>`;
+    statCards = `<div class="flex gap-12" style="margin-top:10px">
+      <div class="stat-card"><div class="stat-label">IP Rate</div><div class="stat-value" style="color:var(--green)">${ip}<span class="stat-unit">bbl/d</span></div></div>
+      <div class="stat-card"><div class="stat-label">Di (annual)</div><div class="stat-value" style="color:var(--red)">${(decline*100).toFixed(0)}<span class="stat-unit">%</span></div></div>
+      <div class="stat-card"><div class="stat-label">Est. EUR</div><div class="stat-value" style="color:var(--blue)">${data[data.length-1].cum.toFixed(0)}<span class="stat-unit">MBO</span></div></div>
+    </div>`;
+  }
   
-  const offsetWells = well ? state.wells.filter(w => w.id !== well.id).map(w => ({...w, dist: Math.hypot(w.lng-well.lng, w.lat-well.lat)})).sort((a,b) => a.dist-b.dist).slice(0,6) : state.wells.slice(0,6);
+  // Fit comparison table
+  const fitTable = fits && fits.length > 0 ? `
+    <div style="margin-top:12px">
+      <div style="font-size:10px;font-weight:700;color:var(--text-dim);font-family:var(--font-mono);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px">Model Comparison</div>
+      <table style="width:100%;font-size:10px;font-family:var(--font-mono);border-collapse:collapse">
+        <tr style="color:var(--text-dim);border-bottom:1px solid var(--border)"><td style="padding:4px 0">Model</td><td>qi</td><td>Di</td>${fits.some(f=>f.b!==undefined)?'<td>b</td>':''}<td>EUR</td><td>R²</td></tr>
+        ${fits.map(f => `<tr style="border-bottom:1px solid var(--border)">
+          <td style="padding:4px 0;color:${f.color};font-weight:600">${f.type}${f === bestFit ? ' ★' : ''}</td>
+          <td>${f.qi}</td>
+          <td>${f.DiAnnual.toFixed(1)}%</td>
+          ${fits.some(ff=>ff.b!==undefined)?`<td>${f.b !== undefined ? f.b : '—'}</td>`:''}
+          <td style="color:var(--blue)">${f.eur} MBO</td>
+          <td style="color:${f.r2>0.8?'var(--green)':f.r2>0.5?'var(--accent)':'var(--red)'}">${f.r2.toFixed(3)}</td>
+        </tr>`).join("")}
+      </table>
+    </div>` : "";
+  
+  // Type curve section
+  const tc = dcaState.typeCurveData;
+  let typeCurveHTML = "";
+  if (tc && !tc.error && tc.p50.length > 0) {
+    const maxTC = Math.max(...tc.p90) * 1.1;
+    const tcW = 250, tcH = 120, tcPad = { t: 14, r: 8, b: 16, l: 35 };
+    const tw = tcW - tcPad.l - tcPad.r, th = tcH - tcPad.t - tcPad.b;
+    const makePts = (arr) => arr.map((v, i) => `${tcPad.l + (i/(arr.length-1))*tw},${tcPad.t + th - (v/maxTC)*th}`).join(" ");
+    typeCurveHTML = `
+      <div class="card" style="margin-top:8px">
+        <div style="font-size:11px;font-weight:700;margin-bottom:2px;color:var(--cyan)">Type Curve — ${tc.formation} · ${tc.county} Co.</div>
+        <div style="font-size:9px;color:var(--text-dim);font-family:var(--font-mono);margin-bottom:6px">${tc.wellCount} wells aggregated · P10/P50/P90</div>
+        <svg viewBox="0 0 ${tcW} ${tcH}" style="width:100%;display:block">
+          <polygon points="${tcPad.l},${tcPad.t+th} ${makePts(tc.p10)} ${tcPad.l+tw},${tcPad.t+th}" fill="rgba(34,211,238,0.06)" />
+          <polygon points="${tcPad.l},${tcPad.t+th} ${makePts(tc.p90)} ${tcPad.l+tw},${tcPad.t+th}" fill="rgba(34,211,238,0.06)" />
+          <polyline points="${makePts(tc.p10)}" fill="none" stroke="var(--cyan)" stroke-width="0.8" stroke-dasharray="2,2" opacity="0.5" />
+          <polyline points="${makePts(tc.p90)}" fill="none" stroke="var(--cyan)" stroke-width="0.8" stroke-dasharray="2,2" opacity="0.5" />
+          <polyline points="${makePts(tc.p50)}" fill="none" stroke="var(--cyan)" stroke-width="1.5" />
+          <text x="${tcPad.l}" y="${tcH-2}" fill="var(--text-muted)" font-size="7" font-family="var(--font-mono)">Mo 1</text>
+          <text x="${tcW-tcPad.r}" y="${tcH-2}" fill="var(--text-muted)" font-size="7" text-anchor="end" font-family="var(--font-mono)">Mo ${tc.months}</text>
+          <text x="${tcW-tcPad.r}" y="${tcPad.t+6}" fill="var(--cyan)" font-size="7" text-anchor="end" font-family="var(--font-mono)">P50: ${Math.round(tc.p50[0])} → ${Math.round(tc.p50[tc.p50.length-1])} bbl/mo</text>
+        </svg>
+      </div>`;
+  } else if (tc && tc.error) {
+    typeCurveHTML = `<div class="card" style="margin-top:8px"><div style="font-size:10px;color:var(--text-dim);font-family:var(--font-mono)">${tc.error}</div></div>`;
+  }
+  
+  // AI analysis section
+  const aiSection = dcaState.aiAnalysis ? `
+    <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border)">
+      <div style="font-size:10px;font-weight:700;color:var(--cyan);font-family:var(--font-mono);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px">🧠 AI Decline Interpretation</div>
+      <div style="font-size:11px;color:var(--text);font-family:var(--font-mono);line-height:1.7;white-space:pre-wrap;max-height:300px;overflow-y:auto">${dcaState.aiAnalysis}</div>
+    </div>` : "";
+  
+  const offsetWells = well ? state.wells.filter(w2 => w2.id !== well.id).map(w2 => ({...w2, dist: Math.hypot(w2.lng-well.lng, w2.lat-well.lat)})).sort((a,b) => a.dist-b.dist).slice(0,6) : state.wells.slice(0,6);
+  
+  // Load data button
+  const loadBtn = well && well.isReal && well.leaseNumber && !hasProdData
+    ? `<button class="btn btn-primary" style="margin-top:10px" onclick="(async()=>{dcaState.prodData=await loadDCAData(state.selectedWell);if(dcaState.prodData){dcaState.fits=runDCAFits(dcaState.prodData);}renderDeclineTab(document.getElementById('main-content'))})()">▸ Load Real Production Data & Fit Curves</button>`
+    : "";
+  
+  const analyzeBtn = hasProdData && fits && fits.length > 0
+    ? `<button class="btn btn-cyan" style="margin-top:8px;width:100%" onclick="runDCAAnalysis(state.selectedWell, dcaState.prodData, dcaState.fits)" ${dcaState.analyzing ? 'disabled' : ''}>${dcaState.analyzing ? '⏳ AI analyzing decline...' : '🧠 AI Analyze This Decline'}</button>`
+    : "";
+  
+  const typeCurveBtn = well && well.isReal
+    ? `<button class="btn" style="margin-top:6px;width:100%;font-size:9px" onclick="generateTypeCurve()" ${dcaState.generatingTypeCurve ? 'disabled' : ''}>${dcaState.generatingTypeCurve ? '⏳ Building type curve...' : '📊 Generate Type Curve — ' + (well.formation || 'Unknown') + ' · ' + (well.county || '') + ' Co.'}</button>`
+    : "";
   
   el.innerHTML = `
     <div class="flex gap-16">
       <div class="flex-1 card">
-        <div style="font-size:13px;font-weight:700;margin-bottom:14px">Decline Curve Analysis${well ? ` <span style="color:var(--accent)">— ${well.lease}</span>` : ''}</div>
-        <svg viewBox="0 0 ${cw} ${ch}" class="chart-svg">
-          <defs><linearGradient id="rg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#e8a838" stop-opacity="0.3"/><stop offset="100%" stop-color="#e8a838" stop-opacity="0"/></linearGradient></defs>
-          ${grid}
-          <polygon points="${pad.l},${pad.t+h} ${ratePts} ${pad.l+w},${pad.t+h}" fill="url(#rg)" />
-          <polyline points="${ratePts}" fill="none" stroke="#e8a838" stroke-width="2" />
-          <polyline points="${cumPts}" fill="none" stroke="#60a5fa" stroke-width="1.5" stroke-dasharray="4,4" />
-          <text x="${pad.l}" y="${ch-4}" fill="#64748b" font-size="9" font-family="var(--font-mono)">0</text>
-          <text x="${cw-pad.r}" y="${ch-4}" fill="#64748b" font-size="9" text-anchor="end" font-family="var(--font-mono)">120 mo</text>
-          <text x="${pad.l}" y="12" fill="#e8a838" font-size="9" font-family="var(--font-mono)">bbl/d ▬</text>
-          <text x="${cw-pad.r}" y="12" fill="#60a5fa" font-size="9" text-anchor="end" font-family="var(--font-mono)">cum MBO ┄</text>
-        </svg>
-        <div class="flex gap-12" style="margin-top:14px">
-          <div class="stat-card"><div class="stat-label">IP Rate</div><div class="stat-value" style="color:var(--green)">${ip}<span class="stat-unit">bbl/d</span></div></div>
-          <div class="stat-card"><div class="stat-label">Di (annual)</div><div class="stat-value" style="color:var(--red)">${(decline*100).toFixed(0)}<span class="stat-unit">%</span></div></div>
-          <div class="stat-card"><div class="stat-label">Est. EUR</div><div class="stat-value" style="color:var(--blue)">${data[data.length-1].cum.toFixed(0)}<span class="stat-unit">MBO</span></div></div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+          <div style="font-size:13px;font-weight:700">Decline Curve Analysis${well ? ` <span style="color:var(--accent)">— ${well.lease}</span>` : ''}</div>
+          ${hasProdData ? '<span style="font-size:9px;font-family:var(--font-mono);color:var(--green);background:var(--green)15;padding:2px 6px;border-radius:3px">LIVE RRC DATA</span>' : well?.isReal ? '<span style="font-size:9px;font-family:var(--font-mono);color:var(--text-dim)">Click Load to fetch production data</span>' : '<span style="font-size:9px;font-family:var(--font-mono);color:var(--text-dim)">SYNTHETIC</span>'}
         </div>
+        ${chartSVG}
+        ${statCards}
+        ${fitTable}
+        ${loadBtn}
+        ${analyzeBtn}
+        ${aiSection}
       </div>
-      <div style="width:260px">
-        <div class="card" style="margin-bottom:10px">
-          <div style="font-size:12px;font-weight:700;margin-bottom:10px">Offset Wells (nearest)</div>
-          ${offsetWells.map(w => `
-            <div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--border);cursor:pointer" onclick="state.selectedWell=state.wells.find(x=>x.id==='${w.id}');render()">
-              <span style="font-size:10px;color:var(--text);font-family:var(--font-mono)">${w.lease.substring(0,22)}</span>
-              <span style="font-size:10px;color:var(--green);font-family:var(--font-mono)">${w.ip} bbl/d</span>
+      <div style="width:270px">
+        <div class="card" style="margin-bottom:8px">
+          <div style="font-size:12px;font-weight:700;margin-bottom:8px">Offset Wells (nearest)</div>
+          ${offsetWells.map(ow => `
+            <div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--border);cursor:pointer" onclick="dcaState.prodData=null;dcaState.fits=null;dcaState.aiAnalysis=null;state.selectedWell=state.wells.find(x=>x.id==='${ow.id}');render()">
+              <span style="font-size:10px;color:var(--text);font-family:var(--font-mono)">${ow.lease.substring(0,22)}</span>
+              <span style="font-size:10px;color:var(--green);font-family:var(--font-mono)">${ow.ip} bbl/d</span>
             </div>
           `).join("")}
         </div>
+        ${typeCurveBtn}
+        ${typeCurveHTML}
       </div>
     </div>
   `;

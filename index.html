@@ -595,6 +595,200 @@ function exportProspect(wellId) {
   URL.revokeObjectURL(url);
 }
 
+function exportProspectPDF(wellId) {
+  const w = state.wells.find(x => x.id === wellId);
+  if (!w) return;
+  
+  const g = gcs();
+  const mc = state.mcResults;
+  const rs = state.riskScores;
+  const notes = state.prospectNotes[wellId] || "";
+  const offsets = state.wells.filter(o => o.id !== w.id)
+    .map(o => ({ ...o, dist: Math.hypot(o.lng - w.lng, o.lat - w.lat) }))
+    .sort((a, b) => a.dist - b.dist).slice(0, 8);
+  const today = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+  
+  // Risk colors
+  const riskColor = v => v >= 4 ? "#22c55e" : v >= 3 ? "#eab308" : "#ef4444";
+  const riskLabel = v => ["","Very Low","Low","Moderate","High","Very High"][v] || "";
+  
+  // Production sparkline SVG
+  const sparkSVG = (() => {
+    const data = w.months || [];
+    if (!data.length) return '<div style="color:#999;font-size:11px">No production data</div>';
+    const max = Math.max(...data) || 1;
+    const pts = data.map((v, i) => `${(i / (data.length - 1)) * 460},${55 - (v / max) * 50}`).join(" ");
+    return `<svg viewBox="0 0 460 60" style="width:100%;height:60px;display:block">
+      <polygon points="0,55 ${pts} 460,55" fill="rgba(52,211,153,0.12)" />
+      <polyline points="${pts}" fill="none" stroke="#34d399" stroke-width="1.5" />
+      <text x="0" y="10" fill="#999" font-size="8" font-family="monospace">${max} bbl/mo</text>
+      <text x="460" y="54" fill="#999" font-size="8" font-family="monospace" text-anchor="end">${data.length} months</text>
+    </svg>`;
+  })();
+  
+  // Decision badge
+  const drillDecision = mc ? (mc.posNPV > 60 && mc.p50.npv > 0 ? "DRILL" : "PASS") : null;
+  const drillColor = drillDecision === "DRILL" ? "#22c55e" : "#ef4444";
+  
+  // Build the HTML for the PDF
+  const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>ProspectSignal Report — ${w.lease}</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap');
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  @page { size: letter; margin: 0.5in; }
+  body { font-family: 'IBM Plex Sans', sans-serif; color: #111; background: #fff; padding: 32px; max-width: 8.5in; }
+  .mono { font-family: 'JetBrains Mono', monospace; }
+  .header { display: flex; align-items: center; justify-content: space-between; border-bottom: 2px solid #e8a838; padding-bottom: 14px; margin-bottom: 18px; }
+  .logo { display: flex; align-items: center; gap: 10px; }
+  .logo-box { width: 30px; height: 30px; border-radius: 6px; background: linear-gradient(135deg, #e8a838, #c97b1c); display: flex; align-items: center; justify-content: center; font-size: 16px; font-weight: 900; color: #fff; font-family: 'JetBrains Mono', monospace; }
+  .logo-text { font-size: 16px; font-weight: 700; }
+  .logo-sub { font-size: 8px; color: #888; font-family: 'JetBrains Mono', monospace; letter-spacing: 2px; text-transform: uppercase; }
+  .meta { text-align: right; font-size: 10px; color: #888; font-family: 'JetBrains Mono', monospace; line-height: 1.6; }
+  .section { margin-bottom: 16px; }
+  .section-title { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 1.5px; color: #e8a838; font-family: 'JetBrains Mono', monospace; margin-bottom: 8px; border-bottom: 1px solid #eee; padding-bottom: 4px; }
+  .grid { display: grid; gap: 6px; }
+  .grid-2 { grid-template-columns: 1fr 1fr; }
+  .grid-4 { grid-template-columns: 1fr 1fr 1fr 1fr; }
+  .field { background: #f8f8f8; border-radius: 6px; padding: 8px 10px; }
+  .field-label { font-size: 9px; color: #999; text-transform: uppercase; letter-spacing: 0.5px; font-family: 'JetBrains Mono', monospace; margin-bottom: 2px; }
+  .field-value { font-size: 13px; font-weight: 600; font-family: 'JetBrains Mono', monospace; }
+  .risk-row { display: flex; align-items: center; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid #f0f0f0; font-size: 11px; }
+  .risk-bar { display: flex; gap: 3px; }
+  .risk-seg { width: 20px; height: 6px; border-radius: 3px; }
+  .offset-row { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid #f5f5f5; font-size: 10px; font-family: 'JetBrains Mono', monospace; }
+  .gcs-box { text-align: center; padding: 12px; background: #f8f8f8; border-radius: 8px; }
+  .gcs-value { font-size: 28px; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
+  .econ-grid { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 6px; }
+  .drill-badge { display: inline-block; font-size: 14px; font-weight: 700; padding: 4px 14px; border-radius: 6px; font-family: 'JetBrains Mono', monospace; }
+  .footer { margin-top: 20px; padding-top: 10px; border-top: 1px solid #eee; display: flex; justify-content: space-between; font-size: 9px; color: #bbb; font-family: 'JetBrains Mono', monospace; }
+  .notes-box { background: #f8f8f8; border-radius: 6px; padding: 10px; font-size: 11px; font-family: 'JetBrains Mono', monospace; color: #333; line-height: 1.6; min-height: 40px; white-space: pre-wrap; }
+</style></head><body>
+
+<!-- HEADER -->
+<div class="header">
+  <div class="logo">
+    <div class="logo-box">P</div>
+    <div>
+      <div class="logo-text"><span style="color:#e8a838">Prospect</span>Signal</div>
+      <div class="logo-sub">AI Petroleum Geology Intelligence</div>
+    </div>
+  </div>
+  <div class="meta">
+    Prospect Summary Report<br>
+    Generated ${today}<br>
+    ${state.basin}
+  </div>
+</div>
+
+<!-- PROSPECT INFO -->
+<div class="section">
+  <div style="font-size:18px;font-weight:700;margin-bottom:2px">${w.lease}</div>
+  <div class="mono" style="font-size:11px;color:#888">API# ${w.id}${w.isReal ? ' · LIVE RRC DATA' : ' · SYNTHETIC'}</div>
+</div>
+
+<div class="section">
+  <div class="section-title">Well Data</div>
+  <div class="grid grid-4">
+    <div class="field"><div class="field-label">Formation</div><div class="field-value">${w.formation}</div></div>
+    <div class="field"><div class="field-label">County</div><div class="field-value">${w.county} Co.</div></div>
+    <div class="field"><div class="field-label">Operator</div><div class="field-value" style="font-size:11px">${w.operator}</div></div>
+    <div class="field"><div class="field-label">Status</div><div class="field-value" style="color:${w.status==='producing'?'#22c55e':w.status==='shut-in'?'#e8a838':'#ef4444'}">${w.status.toUpperCase()}</div></div>
+    <div class="field"><div class="field-label">IP Rate</div><div class="field-value" style="color:#22c55e">${w.ip} bbl/d</div></div>
+    <div class="field"><div class="field-label">Total Depth</div><div class="field-value">${(w.depth || 0).toLocaleString()} ft</div></div>
+    <div class="field"><div class="field-label">Spud Year</div><div class="field-value">${w.year}</div></div>
+    <div class="field"><div class="field-label">Cum Oil</div><div class="field-value" style="color:#e8a838">${(w.cumOil / 1000).toFixed(0)} MBO</div></div>
+  </div>
+</div>
+
+<!-- PRODUCTION -->
+<div class="section">
+  <div class="section-title">Production History (${w.months?.length || 0} months)</div>
+  ${sparkSVG}
+</div>
+
+<!-- RISK + ECONOMICS SIDE BY SIDE -->
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+  <!-- RISK -->
+  <div class="section">
+    <div class="section-title">Risk Assessment</div>
+    ${Object.entries(rs).map(([k, v]) => {
+      const colors = ["","#ef4444","#f97316","#eab308","#84cc16","#22c55e"];
+      return `<div class="risk-row">
+        <span style="font-family:'JetBrains Mono',monospace;text-transform:capitalize">${k}</span>
+        <div class="risk-bar">${[1,2,3,4,5].map(i => `<div class="risk-seg" style="background:${i<=v?colors[v]:'#e5e5e5'}"></div>`).join("")}</div>
+        <span class="mono" style="color:${colors[v]};font-weight:600;font-size:10px">${v}/5 (${v*20}%)</span>
+      </div>`;
+    }).join("")}
+    <div class="gcs-box" style="margin-top:8px">
+      <div style="font-size:9px;color:#999;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px">Geological Chance of Success</div>
+      <div class="gcs-value" style="color:${g>10?'#22c55e':g>3?'#e8a838':'#ef4444'}">${g.toFixed(1)}%</div>
+      <div class="mono" style="font-size:9px;color:#bbb;margin-top:2px">${Object.values(rs).map(v=>(v*20)+"%").join(" × ")}</div>
+    </div>
+  </div>
+  
+  <!-- ECONOMICS -->
+  <div class="section">
+    <div class="section-title">Economics ${mc ? "(Monte Carlo — 5,000 trials)" : ""}</div>
+    ${mc ? `
+      <div class="econ-grid" style="margin-bottom:8px">
+        <div class="field"><div class="field-label">P50 NPV</div><div class="field-value" style="color:${mc.p50.npv>0?'#22c55e':'#ef4444'}">$${(mc.p50.npv/1e6).toFixed(2)}M</div></div>
+        <div class="field"><div class="field-label">Mean NPV</div><div class="field-value" style="color:${mc.mean.npv>0?'#22c55e':'#ef4444'}">$${(mc.mean.npv/1e6).toFixed(2)}M</div></div>
+        <div class="field"><div class="field-label">P(NPV>0)</div><div class="field-value" style="color:${mc.posNPV>60?'#22c55e':'#ef4444'}">${mc.posNPV.toFixed(0)}%</div></div>
+        <div class="field"><div class="field-label">Mean EUR</div><div class="field-value">${mc.mean.eur?.toFixed(0) || "—"} MBO</div></div>
+      </div>
+      <div style="text-align:center;margin-top:8px">
+        <div class="drill-badge" style="background:${drillColor}15;color:${drillColor};border:1px solid ${drillColor}40">
+          ${drillDecision === "DRILL" ? "✓ DRILL" : "✗ PASS"}
+        </div>
+        <div class="mono" style="font-size:9px;color:#999;margin-top:4px">${mc.posNPV > 60 ? "Economics support drilling" : "Marginal — revisit assumptions"}</div>
+      </div>
+      <div class="mono" style="font-size:9px;color:#bbb;margin-top:8px;line-height:1.6">
+        Assumptions: Well cost $${(state.econParams.wellCost/1e3).toFixed(0)}K · Oil $${state.econParams.oilPrice}/bbl · OPEX $${state.econParams.opex}/d · Royalty ${(state.econParams.royalty*100).toFixed(1)}% · Tax ${(state.econParams.tax*100).toFixed(1)}% · Discount ${(state.econParams.discountRate*100).toFixed(0)}%
+      </div>
+    ` : `<div style="color:#999;font-size:11px;font-family:'JetBrains Mono',monospace;padding:20px 0;text-align:center">Run Monte Carlo on Economics tab to populate</div>`}
+  </div>
+</div>
+
+<!-- OFFSETS -->
+<div class="section">
+  <div class="section-title">Nearest Offset Wells (${offsets.length})</div>
+  <div class="offset-row" style="font-weight:600;color:#999;border-bottom:1px solid #ddd">
+    <span style="width:30%">Lease</span><span style="width:18%">Formation</span><span style="width:14%">County</span><span style="width:10%">IP</span><span style="width:12%">Cum Oil</span><span style="width:10%">Status</span>
+  </div>
+  ${offsets.map(o => `<div class="offset-row">
+    <span style="width:30%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${o.lease}</span>
+    <span style="width:18%">${o.formation}</span>
+    <span style="width:14%">${o.county}</span>
+    <span style="width:10%;color:#22c55e;font-weight:600">${o.ip}</span>
+    <span style="width:12%">${(o.cumOil/1000).toFixed(0)} MBO</span>
+    <span style="width:10%;color:${o.status==='producing'?'#22c55e':o.status==='shut-in'?'#e8a838':'#ef4444'}">${o.status}</span>
+  </div>`).join("")}
+</div>
+
+<!-- NOTES -->
+${notes ? `<div class="section">
+  <div class="section-title">Prospect Notes</div>
+  <div class="notes-box">${notes}</div>
+</div>` : ""}
+
+<!-- FOOTER -->
+<div class="footer">
+  <span>ProspectSignal · AI Petroleum Geology Intelligence · prospect-signal.netlify.app</span>
+  <span>${today} · ${state.basin}</span>
+</div>
+
+</body></html>`;
+
+  // Open in new window and trigger print (Save as PDF)
+  const printWindow = window.open("", "_blank", "width=850,height=1100");
+  printWindow.document.write(html);
+  printWindow.document.close();
+  // Auto-trigger print after fonts load
+  printWindow.onload = () => {
+    setTimeout(() => { printWindow.print(); }, 300);
+  };
+}
+
 function gcs() {
   return Object.values(state.riskScores).reduce((a, b) => a * (b * 20 / 100), 1) * 100;
 }
@@ -1028,7 +1222,10 @@ function renderMapTab(el, wells, info) {
         <div style="font-size:10px;color:var(--text-dim);font-family:var(--font-mono);margin-bottom:4px">NEAREST OFFSETS</div>
         ${state.wells.filter(w=>w.id!==sw.id).map(w=>({...w,d:Math.hypot(w.lng-sw.lng,w.lat-sw.lat)})).sort((a,b)=>a.d-b.d).slice(0,4).map(w=>`<div style="display:flex;justify-content:space-between;padding:3px 0;font-size:10px;font-family:var(--font-mono);cursor:pointer;border-bottom:1px solid var(--border)" onclick="state.selectedWell=state.wells.find(x=>x.id==='${w.id}');render()"><span style="color:var(--text)">${w.formation} | ${w.county}</span><span style="color:var(--green)">${w.ip} bbl/d</span></div>`).join("")}
       </div>
-      <button onclick="exportProspect('${sw.id}')" style="width:100%;margin-top:10px;background:linear-gradient(135deg,var(--accent),#c97b1c);border:none;color:#000;padding:8px;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer;font-family:var(--font-mono);letter-spacing:0.5px">↓ EXPORT PROSPECT SUMMARY</button>
+      <div style="display:flex;gap:6px;margin-top:10px">
+        <button onclick="exportProspect('${sw.id}')" style="flex:1;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:6px;font-size:10px;font-weight:700;cursor:pointer;font-family:var(--font-mono)">↓ TXT</button>
+        <button onclick="exportProspectPDF('${sw.id}')" style="flex:2;background:linear-gradient(135deg,var(--accent),#c97b1c);border:none;color:#000;padding:8px;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer;font-family:var(--font-mono);letter-spacing:0.5px">⬇ EXPORT PDF REPORT</button>
+      </div>
     </div>` : '';
   // If map already exists, update only the filter bars and dashboard — don't touch the map DOM
   if (map && document.getElementById('well-map')) {
@@ -1687,7 +1884,10 @@ function renderDetailPanel() {
       <div style="font-size:10px;color:var(--text-dim);font-family:var(--font-mono);margin-bottom:4px">NEAREST OFFSETS</div>
       ${state.wells.filter(w=>w.id!==sw.id).map(w=>({...w,d:Math.hypot(w.lng-sw.lng,w.lat-sw.lat)})).sort((a,b)=>a.d-b.d).slice(0,4).map(w=>`<div style="display:flex;justify-content:space-between;padding:3px 0;font-size:10px;font-family:var(--font-mono);cursor:pointer;border-bottom:1px solid var(--border)" onclick="state.selectedWell=state.wells.find(x=>x.id==='${w.id}');renderDetailPanel()"><span style="color:var(--text)">${w.formation} | ${w.county}</span><span style="color:var(--green)">${w.ip} bbl/d</span></div>`).join("")}
     </div>
-    <button onclick="exportProspect('${sw.id}')" style="width:100%;margin-top:10px;background:linear-gradient(135deg,var(--accent),#c97b1c);border:none;color:#000;padding:8px;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer;font-family:var(--font-mono);letter-spacing:0.5px">↓ EXPORT PROSPECT SUMMARY</button>
+    <div style="display:flex;gap:6px;margin-top:10px">
+      <button onclick="exportProspect('${sw.id}')" style="flex:1;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:6px;font-size:10px;font-weight:700;cursor:pointer;font-family:var(--font-mono)">↓ TXT</button>
+      <button onclick="exportProspectPDF('${sw.id}')" style="flex:2;background:linear-gradient(135deg,var(--accent),#c97b1c);border:none;color:#000;padding:8px;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer;font-family:var(--font-mono);letter-spacing:0.5px">⬇ EXPORT PDF REPORT</button>
+    </div>
   `;
   flexParent.appendChild(detailDiv);
 }

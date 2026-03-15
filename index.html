@@ -124,6 +124,11 @@
     .compare-well-chip .remove:hover { color: var(--red); }
     .compare-grid { display: grid; gap: 10px; margin-top: 10px; }
     .compare-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+    .compare-tray { position: absolute; bottom: 8px; left: 50%; transform: translateX(-50%); z-index: 1001; background: rgba(10,14,20,0.95); border: 1px solid var(--blue); border-radius: 8px; padding: 8px 12px; display: flex; align-items: center; gap: 8px; max-width: 90%; backdrop-filter: blur(8px); }
+    .compare-tray-chip { display: flex; align-items: center; gap: 5px; background: rgba(96,165,250,0.12); border: 1px solid rgba(96,165,250,0.3); border-radius: 5px; padding: 4px 8px; font-size: 9px; font-family: var(--font-mono); color: var(--text); white-space: nowrap; }
+    .compare-tray-chip .num { color: var(--blue); font-weight: 700; }
+    .compare-tray-chip .x { cursor: pointer; color: var(--text-muted); margin-left: 4px; font-size: 11px; }
+    .compare-tray-chip .x:hover { color: var(--red); }
     .well-field-label { font-size: 9px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px; font-family: var(--font-mono); }
     .well-field-value { font-size: 12px; font-weight: 600; font-family: var(--font-mono); color: var(--text); }
     
@@ -933,12 +938,6 @@ function renderMarkers() {
     marker.on("click", async (e) => {
       L.DomEvent.stopPropagation(e);
       
-      // Shift+click: add/remove from compare list
-      if (e.originalEvent.shiftKey) {
-        toggleCompareWell(well);
-        return;
-      }
-      
       state.selectedWell = well;
       dcaState.prodData = null; dcaState.fits = null; dcaState.aiAnalysis = null; dcaState.typeCurveData = null;
       // Only update the detail panel, not the whole map
@@ -1341,7 +1340,7 @@ function renderMapTab(el, wells, info) {
             <div class="map-legend-item"><div class="map-legend-dot" style="background:var(--accent)"></div>Shut-in</div>
             <div class="map-legend-item"><div class="map-legend-dot" style="background:var(--red)"></div>Plugged</div>
           </div>
-          <div class="map-overlay map-well-count"><span style="color:var(--accent);font-weight:700">${wells.length}</span> wells <span style="color:var(--text-muted);font-size:8px;margin-left:4px">shift+click to compare</span></div>
+          <div class="map-overlay map-well-count"><span style="color:var(--accent);font-weight:700">${wells.length}</span> wells</div>
         </div>
       </div>
       ${wellDetail}
@@ -2020,7 +2019,11 @@ function renderDetailPanel() {
   detailDiv.innerHTML = `
     <div style="font-size:14px;font-weight:700;color:var(--accent);margin-bottom:3px">${sw.lease}${liveBadge}</div>
     <div style="font-size:11px;color:var(--text-dim);font-family:var(--font-mono);margin-bottom:4px">API# ${sw.id}</div>
-    <a href="${rrcUrl}" target="_blank" rel="noopener" style="display:inline-block;margin-bottom:10px;font-size:10px;font-family:var(--font-mono);color:var(--cyan);text-decoration:none;border:1px solid var(--cyan);padding:3px 8px;border-radius:4px">↗ View on Texas RRC</a>
+    <div style="display:flex;gap:6px;margin-bottom:10px">
+      <a href="${rrcUrl}" target="_blank" rel="noopener" style="font-size:10px;font-family:var(--font-mono);color:var(--cyan);text-decoration:none;border:1px solid var(--cyan);padding:3px 8px;border-radius:4px">↗ RRC</a>
+      <button onclick="toggleCompareWell(state.selectedWell);renderDetailPanel()" style="font-size:10px;font-family:var(--font-mono);background:${state.compareWells.some(cw=>cw.id===sw.id)?'var(--blue)':'var(--bg-input)'};border:1px solid ${state.compareWells.some(cw=>cw.id===sw.id)?'var(--blue)':'var(--border)'};color:${state.compareWells.some(cw=>cw.id===sw.id)?'#fff':'var(--blue)'};padding:3px 8px;border-radius:4px;cursor:pointer">${state.compareWells.some(cw=>cw.id===sw.id)?'✓ In Compare':'+ Compare'}</button>
+      <span style="font-size:9px;color:var(--text-muted);font-family:var(--font-mono);align-self:center">${state.compareWells.length}/3</span>
+    </div>
     <div class="well-detail-grid" style="margin-bottom:10px">
       ${[["Formation",sw.formation],["County",sw.county+" Co."],["Operator",sw.operator],["Status",`<span style="color:${sw.status==='producing'?'var(--green)':sw.status==='shut-in'?'var(--accent)':'var(--red)'}">${sw.status.toUpperCase()}</span>`],["IP Rate",sw.ip+" bbl/d"],["Depth",sw.depth.toLocaleString()+" ft"],["Spud Year",sw.year],["Cum Oil",(sw.cumOil/1000).toFixed(0)+" MBO"]].map(([k,v]) => `<div><div class="well-field-label">${k}</div><div class="well-field-value">${v}</div></div>`).join("")}
     </div>
@@ -2072,13 +2075,45 @@ function clearCompare() {
 }
 
 function renderCompareBar() {
-  let bar = document.getElementById("compare-bar-container");
+  // ── Floating tray inside the map ──
+  let tray = document.getElementById("compare-tray");
   if (state.compareWells.length === 0) {
+    if (tray) tray.remove();
+  } else {
+    if (!tray) {
+      const mapContainer = document.getElementById("map-container");
+      if (mapContainer) {
+        tray = document.createElement("div");
+        tray.id = "compare-tray";
+        tray.className = "compare-tray";
+        mapContainer.appendChild(tray);
+      }
+    }
+    if (tray) {
+      const chips = state.compareWells.map((w, i) => `
+        <div class="compare-tray-chip">
+          <span class="num">${i + 1}</span>
+          <span>${w.lease.substring(0, 18)}</span>
+          <span style="color:var(--green)">${w.ip} bbl/d</span>
+          <span class="x" onclick="event.stopPropagation();state.compareWells.splice(${i},1);state.compareResult=null;renderMarkers();renderCompareBar()">✕</span>
+        </div>
+      `).join("");
+      const canCompare = state.compareWells.length >= 2;
+      tray.innerHTML = `
+        ${chips}
+        ${canCompare ? `<button style="font-size:9px;font-family:var(--font-mono);background:var(--blue);border:none;color:#fff;padding:5px 10px;border-radius:5px;cursor:pointer;font-weight:700;white-space:nowrap" onclick="runAICompare()" ${state.comparing ? 'disabled' : ''}>${state.comparing ? '⏳ Comparing...' : '🧠 Compare'}</button>` : `<span style="font-size:9px;color:var(--text-muted);font-family:var(--font-mono);white-space:nowrap">Select ${2 - state.compareWells.length} more</span>`}
+        <span class="x" onclick="clearCompare()" style="cursor:pointer;color:var(--text-muted);font-size:11px" title="Clear all">✕</span>
+      `;
+    }
+  }
+  
+  // ── Full compare panel below the map ──
+  let bar = document.getElementById("compare-bar-container");
+  if (state.compareWells.length < 2) {
     if (bar) bar.innerHTML = "";
     return;
   }
   if (!bar) {
-    // Create the container after the map
     const mapParent = document.querySelector("#map-container")?.parentElement;
     if (!mapParent) return;
     bar = document.createElement("div");
@@ -2086,30 +2121,7 @@ function renderCompareBar() {
     mapParent.parentElement.insertBefore(bar, mapParent.nextSibling);
   }
   
-  const wells = state.compareWells;
-  const chips = wells.map((w, i) => `
-    <span class="compare-well-chip">
-      <span style="color:var(--accent);font-weight:600">${i + 1}</span>
-      <span style="color:var(--text)">${w.lease.substring(0, 25)}</span>
-      <span style="color:var(--text-dim)">${w.formation} · ${w.ip} bbl/d</span>
-      <span class="remove" onclick="state.compareWells.splice(${i},1);state.compareResult=null;renderMarkers();renderCompareBar()">✕</span>
-    </span>
-  `).join("");
-  
-  const canCompare = wells.length >= 2;
-  
   bar.innerHTML = `
-    <div class="compare-bar">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
-        <div style="font-size:10px;font-weight:700;color:var(--blue);font-family:var(--font-mono);text-transform:uppercase;letter-spacing:0.5px">⟨⟩ Compare Mode — ${wells.length}/3 wells selected</div>
-        <div style="display:flex;gap:6px">
-          <button class="btn" style="font-size:9px;padding:3px 8px" onclick="clearCompare()">Clear</button>
-          ${canCompare ? `<button class="btn btn-primary" style="font-size:9px;padding:3px 10px" onclick="runAICompare()" ${state.comparing ? 'disabled' : ''}>${state.comparing ? '⏳ AI Comparing...' : '🧠 AI Compare (' + wells.length + ' wells)'}</button>` : '<span style="font-size:9px;color:var(--text-dim);font-family:var(--font-mono)">Shift+click one more well</span>'}
-        </div>
-      </div>
-      <div style="display:flex;flex-wrap:wrap">${chips}</div>
-      <div style="font-size:9px;color:var(--text-muted);font-family:var(--font-mono);margin-top:4px">Shift+click wells on map to add/remove</div>
-    </div>
     ${renderCompareCards()}
     ${state.compareResult ? renderCompareAIResult() : ''}
   `;

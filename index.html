@@ -421,6 +421,7 @@ let state = {
   compareWells: [], // up to 3 wells for side-by-side comparison
   compareResult: null, // AI comparison output
   comparing: false, // loading state
+  compareMode: false, // when true, clicking wells adds to compare list
 };
 
 let map = null;
@@ -938,6 +939,12 @@ function renderMarkers() {
     marker.on("click", async (e) => {
       L.DomEvent.stopPropagation(e);
       
+      // Compare mode: clicking wells adds them to compare list
+      if (state.compareMode) {
+        toggleCompareWell(well);
+        return;
+      }
+      
       state.selectedWell = well;
       dcaState.prodData = null; dcaState.fits = null; dcaState.aiAnalysis = null; dcaState.typeCurveData = null;
       // Only update the detail panel, not the whole map
@@ -1157,7 +1164,7 @@ function handleAIKeydown(e) {
 // ============ RENDERING ============
 async function setBasin(b) {
   state.basin = b; state.selectedWell = null; state.filterStatus = "all"; state.filterFormation = "all"; state.filterOperator = "all"; state.filterCounty = "all"; state.filterDepth = "all";
-  state.compareWells = []; state.compareResult = null; state.comparing = false;
+  state.compareWells = []; state.compareResult = null; state.comparing = false; state.compareMode = false;
   if (dataSource === "supabase") {
     const realWells = await loadSupabaseWells(b);
     state.wells = (realWells && realWells.length > 0) ? realWells : generateWells(b);
@@ -1202,7 +1209,7 @@ function render() {
   const main = document.getElementById("main-content");
   if (state.activeTab === "map") renderMapTab(main, wells, info);
   else if (state.activeTab === "formations") renderFormationsTab(main);
-  else if (state.activeTab === "decline") renderDeclineTab(main);
+  else if (state.activeTab === "decline") { autoLoadDCA(); renderDeclineTab(main); }
   else if (state.activeTab === "risk") renderRiskTab(main, info);
   else if (state.activeTab === "economics") renderEconTab(main);
   else if (state.activeTab === "ai") renderAITab(main);
@@ -1334,6 +1341,7 @@ function renderMapTab(el, wells, info) {
             <button class="map-mode-btn map-style-btn ${state.mapMode==='opportunity'?'active':''}" data-mode="opportunity" onclick="setMapMode('opportunity')" style="${state.mapMode==='opportunity'?'color:var(--cyan);border-color:var(--cyan)':''}">◉ Opportunity</button>
             <div style="border-top:1px solid var(--border);margin:2px 0"></div>
             <button id="ai-prospect-btn" onclick="generateAIProspects()" style="font-size:10px;font-family:var(--font-mono);background:linear-gradient(135deg,var(--accent),#c97b1c);border:none;color:#0a0e14;padding:6px 8px;border-radius:4px;cursor:pointer;font-weight:700;white-space:nowrap">${state.aiProspects.length > 0 ? '✅ ' + state.aiProspects.length + ' Prospects' : '🧠 AI Find Prospects'}</button>
+            <button onclick="toggleCompareMode()" style="font-size:10px;font-family:var(--font-mono);background:${state.compareMode?'var(--blue)':'rgba(96,165,250,0.15)'};border:1px solid ${state.compareMode?'var(--blue)':'rgba(96,165,250,0.3)'};color:${state.compareMode?'#fff':'var(--blue)'};padding:6px 8px;border-radius:4px;cursor:pointer;font-weight:700;white-space:nowrap">${state.compareMode ? '✓ Compare ON ('+state.compareWells.length+'/3)' : '⟨⟩ Compare Wells'}</button>
           </div>
           <div class="map-overlay map-legend">
             <div class="map-legend-item"><div class="map-legend-dot" style="background:var(--green)"></div>Producing</div>
@@ -1923,8 +1931,8 @@ function renderDetailPanel() {
   
   const dcaSection = `
     <div class="accordion">
-      <div class="accordion-header" onclick="toggleAccordion('dca-body')">
-        <span class="accordion-title" style="color:var(--accent)">⟋ Decline Analysis</span>
+      <div class="accordion-header" onclick="toggleAccordion('dca-body');if(!dcaState.prodData&&state.selectedWell?.isReal){autoLoadDCA().then(()=>renderDetailPanel())}">
+        <span class="accordion-title" style="color:var(--accent)">⟋ Decline Analysis${hasDCA ? ' — ' + bestFit.type + ' R²=' + bestFit.r2.toFixed(2) : ''}</span>
         <span class="accordion-arrow" id="dca-body-arrow">▸</span>
       </div>
       <div class="accordion-body" id="dca-body">
@@ -1939,7 +1947,7 @@ function renderDetailPanel() {
           <button class="btn btn-cyan" style="width:100%;font-size:9px;padding:5px" onclick="runDCAAnalysis(state.selectedWell,dcaState.prodData,dcaState.fits)" ${dcaState.analyzing?'disabled':''}>${dcaState.analyzing?'⏳ Analyzing...':'🧠 AI Interpret Decline'}</button>
           ${dcaState.aiAnalysis ? `<div style="margin-top:6px;font-size:10px;color:var(--text);font-family:var(--font-mono);line-height:1.6;max-height:200px;overflow-y:auto;white-space:pre-wrap;background:var(--bg-input);border-radius:6px;padding:8px">${dcaState.aiAnalysis}</div>` : ''}
         ` : sw.isReal && sw.leaseNumber ? `
-          <button class="btn btn-primary" style="width:100%;font-size:9px;padding:5px" onclick="(async()=>{dcaState.prodData=await loadDCAData(state.selectedWell);if(dcaState.prodData){dcaState.fits=runDCAFits(dcaState.prodData);}renderDetailPanel()})()">▸ Load Production & Fit Curves</button>
+          <div style="font-size:10px;color:var(--text-dim);font-family:var(--font-mono);padding:8px 0">⏳ Loading production data...</div>
         ` : `<div style="font-size:10px;color:var(--text-dim);font-family:var(--font-mono)">Select a real RRC well to analyze</div>`}
       </div>
     </div>`;
@@ -2051,6 +2059,15 @@ function renderDetailPanel() {
   flexParent.appendChild(detailDiv);
 }
 
+function toggleCompareMode() {
+  state.compareMode = !state.compareMode;
+  if (!state.compareMode && state.compareWells.length === 0) {
+    state.compareResult = null;
+  }
+  render();
+  if (map) renderMarkers();
+}
+
 function toggleCompareWell(well) {
   const idx = state.compareWells.findIndex(w => w.id === well.id);
   if (idx >= 0) {
@@ -2070,8 +2087,10 @@ function clearCompare() {
   state.compareWells = [];
   state.compareResult = null;
   state.comparing = false;
+  state.compareMode = false;
   renderMarkers();
   renderCompareBar();
+  render();
 }
 
 function renderCompareBar() {
@@ -2510,6 +2529,17 @@ async function generateTypeCurve() {
   renderDeclineTab(document.getElementById("main-content"));
 }
 
+async function autoLoadDCA() {
+  const well = state.selectedWell;
+  if (!well || !well.isReal || !well.leaseNumber) return;
+  if (dcaState.prodData && dcaState.prodData.length > 0) return; // already loaded
+  dcaState.prodData = await loadDCAData(well);
+  if (dcaState.prodData) {
+    dcaState.fits = runDCAFits(dcaState.prodData);
+    renderDeclineTab(document.getElementById("main-content"));
+  }
+}
+
 function renderDeclineTab(el) {
   const well = state.selectedWell;
   const hasProdData = dcaState.prodData && dcaState.prodData.length > 0;
@@ -2673,7 +2703,7 @@ function renderDeclineTab(el) {
   
   // Load data button
   const loadBtn = well && well.isReal && well.leaseNumber && !hasProdData
-    ? `<button class="btn btn-primary" style="margin-top:10px" onclick="(async()=>{dcaState.prodData=await loadDCAData(state.selectedWell);if(dcaState.prodData){dcaState.fits=runDCAFits(dcaState.prodData);}renderDeclineTab(document.getElementById('main-content'))})()">▸ Load Real Production Data & Fit Curves</button>`
+    ? `<div style="margin-top:10px;font-size:10px;color:var(--text-dim);font-family:var(--font-mono)">⏳ Loading production data...</div>`
     : "";
   
   const analyzeBtn = hasProdData && fits && fits.length > 0

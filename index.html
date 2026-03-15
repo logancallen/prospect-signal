@@ -213,6 +213,7 @@ const MAP_STYLES = {
 
 const TABS = [
   { id: "map", label: "⊕ Well Map", color: "var(--green)" },
+  { id: "formations", label: "▤ Formations", color: "var(--accent)" },
   { id: "decline", label: "⟋ Decline", color: "var(--accent)" },
   { id: "risk", label: "◈ Risk Matrix", color: "var(--purple)" },
   { id: "economics", label: "$ Economics", color: "var(--blue)" },
@@ -395,6 +396,8 @@ let state = {
   prospectNotes: {},
   aiProspects: [], // AI-generated prospect pins
   generatingProspects: false,
+  lastRefreshDate: null, // set after Supabase init
+  totalWellCount: null, // set after Supabase init
 };
 
 let map = null;
@@ -954,6 +957,9 @@ function render() {
   const avgIP = wells.length > 0 ? Math.round(wells.reduce((s, w) => s + w.ip, 0) / wells.length) : 0;
   const cumOil = wells.reduce((s, w) => s + w.cumOil, 0);
   const g = gcs();
+  const dataFreshnessLabel = state.lastRefreshDate 
+    ? `Updated ${state.lastRefreshDate} · ${state.totalWellCount || wells.length} wells`
+    : `TX Railroad Commission · ${wells.length} wells`;
   
   // Tabs
   document.getElementById("tabs").innerHTML = TABS.map(t =>
@@ -967,12 +973,11 @@ function render() {
     <div class="stat-card"><div class="stat-label">Cum Production</div><div class="stat-value" style="color:var(--accent)">${(cumOil/1e6).toFixed(1)}<span class="stat-unit">MMbbl</span></div></div>
     <div class="stat-card"><div class="stat-label">GCS</div><div class="stat-value" style="color:${g>10?'var(--green)':g>3?'var(--accent)':'var(--red)'}">${g.toFixed(1)}<span class="stat-unit">%</span></div><div class="stat-sub">Geological chance of success</div></div>
     <div class="stat-card"><div class="stat-label">Basin</div><div class="stat-value" style="color:var(--blue)">${state.basin.split(" ")[0]}</div><div class="stat-sub">${info.primaryProduct}</div></div>
-    <div class="stat-card"><div class="stat-label">Data Source</div><div class="stat-value" style="color:${dataSource==='supabase'?'var(--green)':'var(--text-dim)'}; font-size:14px">${dataSource==='supabase'?'◉ LIVE RRC':'◎ SYNTHETIC'}</div><div class="stat-sub">${dataSource==='supabase'?'TX Railroad Commission':'Demo data'}</div></div>
+    <div class="stat-card"><div class="stat-label">Data Source</div><div class="stat-value" style="color:${dataSource==='supabase'?'var(--green)':'var(--text-dim)'}; font-size:14px">${dataSource==='supabase'?'◉ LIVE RRC':'◎ SYNTHETIC'}</div><div class="stat-sub">${dataSource==='supabase'? dataFreshnessLabel :'Demo data'}</div></div>
   `;
-  
-  // Main content by tab
   const main = document.getElementById("main-content");
   if (state.activeTab === "map") renderMapTab(main, wells, info);
+  else if (state.activeTab === "formations") renderFormationsTab(main);
   else if (state.activeTab === "decline") renderDeclineTab(main);
   else if (state.activeTab === "risk") renderRiskTab(main, info);
   else if (state.activeTab === "economics") renderEconTab(main);
@@ -1482,13 +1487,16 @@ function updateFilterBar() {
   if (statsBar) {
     const g = gcs();
     const info = TX_BASINS[state.basin];
+    const dataFreshnessLabel = state.lastRefreshDate 
+      ? `Updated ${state.lastRefreshDate} · ${state.totalWellCount || wells.length} wells`
+      : `TX Railroad Commission · ${wells.length} wells`;
     statsBar.innerHTML = `
       <div class="stat-card"><div class="stat-label">Total Wells</div><div class="stat-value" style="color:var(--text)">${wells.length}</div><div class="stat-sub">${producing} producing</div></div>
       <div class="stat-card"><div class="stat-label">Avg IP</div><div class="stat-value" style="color:var(--green)">${avgIP}<span class="stat-unit">bbl/d</span></div></div>
       <div class="stat-card"><div class="stat-label">Cum Production</div><div class="stat-value" style="color:var(--accent)">${(cumOil/1e6).toFixed(1)}<span class="stat-unit">MMbbl</span></div></div>
       <div class="stat-card"><div class="stat-label">GCS</div><div class="stat-value" style="color:${g>10?'var(--green)':g>3?'var(--accent)':'var(--red)'}">${g.toFixed(1)}<span class="stat-unit">%</span></div><div class="stat-sub">Geological chance of success</div></div>
       <div class="stat-card"><div class="stat-label">Basin</div><div class="stat-value" style="color:var(--blue)">${state.basin.split(" ")[0]}</div><div class="stat-sub">${info.primaryProduct}</div></div>
-      <div class="stat-card"><div class="stat-label">Data Source</div><div class="stat-value" style="color:${dataSource==='supabase'?'var(--green)':'var(--text-dim)'}; font-size:14px">${dataSource==='supabase'?'◉ LIVE RRC':'◎ SYNTHETIC'}</div><div class="stat-sub">${dataSource==='supabase'?'TX Railroad Commission':'Demo data'}</div></div>
+      <div class="stat-card"><div class="stat-label">Data Source</div><div class="stat-value" style="color:${dataSource==='supabase'?'var(--green)':'var(--text-dim)'}; font-size:14px">${dataSource==='supabase'?'◉ LIVE RRC':'◎ SYNTHETIC'}</div><div class="stat-sub">${dataSource==='supabase'? dataFreshnessLabel :'Demo data'}</div></div>
     `;
   }
 }
@@ -2062,6 +2070,164 @@ function renderAITab(el) {
   if (aiConversation.length > 0) renderAIChatMessages();
 }
 
+// ============ FORMATIONS REFERENCE CARD ============
+function renderFormationsTab(el) {
+  const isNCTX = state.basin.startsWith("N. Central");
+  
+  // Formation data — verified depths, porosity, permeability from AI system prompt + RRC data
+  const NCTX_FORMATIONS = [
+    { name: "Wichita-Albany", age: "Lower Permian (Wolfcampian)", depth: "400–1,200", avgDepth: 800, porosity: "12–18%", perm: "20–200 md", product: "Oil", type: "Sandstone lenses", notes: "Shallowest pay. Red bed sequence overlying Cisco. Sandstone lenses in shale.", color: "var(--red)", fields: "Electra (shallow), Iowa Park" },
+    { name: "Cisco Sand", age: "Upper Penn (Virgilian)", depth: "700–1,900", avgDepth: 1300, porosity: "15–22%", perm: "50–500 md", product: "Oil", type: "Sandstone — anticlinal traps", notes: "THE bread-and-butter pay. Electra, Burkburnett, KMA. Extensive waterflood. Gunsight Lime is a member.", color: "var(--green)", fields: "Electra (1911), Burkburnett (1918), KMA, Petrolia" },
+    { name: "Gunsight Lime", age: "Upper Penn (Cisco Group)", depth: "800–1,500", avgDepth: 1150, porosity: "8–15%", perm: "5–100 md", product: "Oil", type: "Limestone — Cisco member", notes: "Limestone member within Cisco Group. Often co-produced with Cisco sands.", color: "var(--green)", fields: "Electra, KMA complex" },
+    { name: "Canyon Lime", age: "Upper Penn (Missourian)", depth: "3,000–4,800", avgDepth: 3900, porosity: "8–18% (reef), 2–6% (off-reef)", perm: "1–150 md", product: "Oil & Gas", type: "Limestone — reef buildups", notes: "Reef/mound production. High porosity in reef core, tight off-reef. Palo Pinto and Home Creek Limestone members.", color: "var(--blue)", fields: "Baylor Co., Archer Co., Young Co." },
+    { name: "Caddo Limestone", age: "Pennsylvanian", depth: "3,200–4,200", avgDepth: 3700, porosity: "4–12%", perm: "1–50 md (fracture-dependent)", product: "Oil", type: "Fractured limestone", notes: "Classic N. Texas fractured limestone pay. Production depends on natural fracture networks.", color: "var(--purple)", fields: "Clay Co., Archer Co., Wichita Co." },
+    { name: "Strawn Sand", age: "Mid Penn (Desmoinesian)", depth: "3,500–5,500", avgDepth: 4500, porosity: "12–20%", perm: "10–200 md", product: "Oil & Gas", type: "Sandstone with limestone lenses", notes: "Major producer in Baylor/Archer/Young counties. Includes Mineral Wells Formation. Often found beneath Canyon reef.", color: "var(--accent)", fields: "Seymour (1950s), Archer City, Graham/Newcastle" },
+    { name: "Bend Conglomerate", age: "Mississippian", depth: "4,500–6,000", avgDepth: 5250, porosity: "6–14%", perm: "5–80 md", product: "Oil & Gas", type: "Conglomerate & limestone", notes: "Found primarily in Clay and Montague counties. Conglomerate with limestone matrix.", color: "var(--cyan)", fields: "Clay Co., Montague Co." },
+    { name: "Ellenburger", age: "Ordovician", depth: "5,000–7,000", avgDepth: 6000, porosity: "2–8% (vuggy/fracture)", perm: "Fracture-dependent", product: "Oil & Gas", notes: "Deepest target. Dolomite karst reservoirs. High risk, high reward. Fractured/vuggy porosity. Unpredictable.", type: "Dolomite — karst/fracture", color: "var(--red)", fields: "Scattered — exploratory" },
+  ];
+  
+  const OTHER_BASIN_FORMATIONS = {
+    "Permian Basin": [
+      { name: "San Andres", depth: "3,000–5,500", product: "Oil", type: "Dolomite/Limestone", notes: "Prolific shallow conventional producer." },
+      { name: "Clear Fork", depth: "5,000–7,000", product: "Oil", type: "Dolomite", notes: "Tight formation, waterflood candidates." },
+      { name: "Spraberry", depth: "6,000–8,000", product: "Oil", type: "Siltstone/Sandstone", notes: "Largest oil field in Western Hemisphere by area." },
+      { name: "Wolfcamp", depth: "6,500–11,000", product: "Oil & Gas", type: "Shale/Limestone", notes: "Primary unconventional target. Stacked pay A/B/C/D benches." },
+      { name: "Bone Spring", depth: "8,000–12,000", product: "Oil & Gas", type: "Limestone/Sandstone", notes: "Delaware Basin primary target." },
+    ],
+    "Eagle Ford Shale": [
+      { name: "Georgetown", depth: "4,000–6,000", product: "Gas", type: "Limestone", notes: "Conventional target above Eagle Ford." },
+      { name: "Buda Limestone", depth: "5,000–8,000", product: "Oil & Gas", type: "Limestone", notes: "Hard, tight limestone beneath Eagle Ford." },
+      { name: "Eagle Ford", depth: "4,000–14,000", product: "Oil/Condensate/Gas", type: "Organic-rich marl/shale", notes: "Primary unconventional target. Oil window in south, gas in east." },
+      { name: "Austin Chalk", depth: "3,000–7,000", product: "Oil & Gas", type: "Fractured chalk", notes: "Naturally fractured. Horizontal drilling revived production." },
+    ],
+  };
+  
+  const formations = isNCTX ? NCTX_FORMATIONS : (OTHER_BASIN_FORMATIONS[state.basin] || []);
+  const maxDepth = isNCTX ? 7500 : 15000;
+  
+  // Build depth column visualization
+  const depthVizHeight = 500;
+  const depthScale = (d) => (d / maxDepth) * depthVizHeight;
+  
+  const depthBars = formations.map((f, i) => {
+    const depthParts = f.depth.replace(/,/g, "").split("–");
+    const top = parseInt(depthParts[0]) || 0;
+    const bottom = parseInt(depthParts[1]) || top + 500;
+    const yTop = depthScale(top);
+    const yBot = depthScale(bottom);
+    const height = yBot - yTop;
+    const color = f.color || "var(--accent)";
+    
+    return `<div style="position:absolute;left:60px;right:16px;top:${yTop}px;height:${Math.max(height, 24)}px;background:${color}15;border-left:3px solid ${color};border-radius:0 6px 6px 0;display:flex;align-items:center;padding:0 10px;cursor:pointer;transition:background 0.2s" onmouseover="this.style.background='${color}30'" onmouseout="this.style.background='${color}15'" onclick="document.getElementById('fm-detail-${i}').scrollIntoView({behavior:'smooth',block:'center'})">
+      <span style="font-size:11px;font-weight:600;color:${color};font-family:var(--font-mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${f.name}</span>
+      <span style="margin-left:auto;font-size:9px;color:var(--text-dim);font-family:var(--font-mono);flex-shrink:0;padding-left:8px">${f.depth} ft</span>
+    </div>`;
+  }).join("");
+  
+  // Depth tick marks
+  const ticks = isNCTX ? [0, 1000, 2000, 3000, 4000, 5000, 6000, 7000] : [0, 2000, 4000, 6000, 8000, 10000, 12000, 14000];
+  const tickMarks = ticks.map(d => `
+    <div style="position:absolute;left:0;top:${depthScale(d)}px;width:55px;text-align:right;font-size:9px;color:var(--text-muted);font-family:var(--font-mono)">${d > 0 ? (d/1000).toFixed(0) + "K'" : "Surface"}</div>
+    <div style="position:absolute;left:58px;right:0;top:${depthScale(d)}px;height:0.5px;background:var(--border)"></div>
+  `).join("");
+  
+  // Detail cards
+  const detailCards = formations.map((f, i) => {
+    const color = f.color || "var(--accent)";
+    return `
+    <div class="card" id="fm-detail-${i}" style="border-left:3px solid ${color};margin-bottom:8px">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+        <div style="font-size:13px;font-weight:700;color:${color}">${f.name}</div>
+        <span style="font-size:9px;color:var(--text-dim);font-family:var(--font-mono);background:var(--bg-input);padding:2px 6px;border-radius:4px">${f.age || ""}</span>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;margin-bottom:8px">
+        <div><div style="font-size:9px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;font-family:var(--font-mono)">Depth</div><div style="font-size:12px;font-weight:600;font-family:var(--font-mono)">${f.depth} ft</div></div>
+        <div><div style="font-size:9px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;font-family:var(--font-mono)">Porosity</div><div style="font-size:12px;font-weight:600;font-family:var(--font-mono)">${f.porosity || "—"}</div></div>
+        <div><div style="font-size:9px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;font-family:var(--font-mono)">Perm</div><div style="font-size:12px;font-weight:600;font-family:var(--font-mono)">${f.perm || "—"}</div></div>
+        <div><div style="font-size:9px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;font-family:var(--font-mono)">Product</div><div style="font-size:12px;font-weight:600;font-family:var(--font-mono);color:var(--green)">${f.product}</div></div>
+      </div>
+      <div style="font-size:10px;color:var(--text-dim);font-family:var(--font-mono);line-height:1.7;margin-bottom:6px">
+        <span style="color:var(--text-muted)">Type:</span> ${f.type || "—"}
+      </div>
+      <div style="font-size:10px;color:var(--text);font-family:var(--font-mono);line-height:1.7;margin-bottom:6px">${f.notes}</div>
+      ${f.fields ? `<div style="font-size:10px;font-family:var(--font-mono);color:var(--text-dim)"><span style="color:var(--text-muted)">Key fields:</span> <span style="color:var(--accent)">${f.fields}</span></div>` : ""}
+    </div>`;
+  }).join("");
+  
+  // Well count by formation from loaded data
+  const fmCounts = {};
+  state.wells.forEach(w => {
+    if (w.formation && w.formation !== "Unknown") {
+      fmCounts[w.formation] = (fmCounts[w.formation] || 0) + 1;
+    }
+  });
+  const fmCountRows = Object.entries(fmCounts)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 12)
+    .map(([name, count]) => `<div style="display:flex;justify-content:space-between;padding:3px 0;border-bottom:0.5px solid var(--border);font-size:10px;font-family:var(--font-mono)"><span style="color:var(--text)">${name.substring(0, 30)}</span><span style="color:var(--accent)">${count.toLocaleString()}</span></div>`)
+    .join("");
+  
+  el.innerHTML = `
+    <div style="margin-bottom:10px">
+      <div style="font-size:14px;font-weight:700;margin-bottom:3px">Formation Reference — ${state.basin}</div>
+      <div style="font-size:11px;color:var(--text-dim);font-family:var(--font-mono)">${isNCTX ? "8 producing formations · Pennsylvanian–Ordovician · 400–7,000 ft" : formations.length + " key formations"}</div>
+    </div>
+    <div class="flex gap-16">
+      <!-- Depth column visualization -->
+      <div style="width:340px;flex-shrink:0">
+        <div class="card" style="padding:16px">
+          <div style="font-size:11px;font-weight:700;margin-bottom:12px;color:var(--accent);font-family:var(--font-mono);text-transform:uppercase;letter-spacing:0.5px">Stratigraphic Column</div>
+          <div style="position:relative;height:${depthVizHeight + 20}px">
+            ${tickMarks}
+            ${depthBars}
+          </div>
+          <div style="margin-top:14px;font-size:9px;color:var(--text-muted);font-family:var(--font-mono);text-align:center">Click formation to scroll to details</div>
+        </div>
+        ${fmCountRows ? `
+        <div class="card" style="margin-top:8px">
+          <div style="font-size:11px;font-weight:700;margin-bottom:8px;color:var(--accent);font-family:var(--font-mono);text-transform:uppercase;letter-spacing:0.5px">Wells by Formation/Field</div>
+          <div style="font-size:9px;color:var(--text-dim);font-family:var(--font-mono);margin-bottom:6px">From ${state.wells.length.toLocaleString()} loaded wells</div>
+          ${fmCountRows}
+        </div>` : ""}
+      </div>
+      <!-- Detail cards -->
+      <div class="flex-1" style="max-height:calc(100vh - 260px);overflow-y:auto;padding-right:4px">
+        ${detailCards}
+        ${isNCTX ? `
+        <div class="card" style="border-left:3px solid var(--text-muted)">
+          <div style="font-size:12px;font-weight:700;margin-bottom:6px">Structural Context</div>
+          <div style="font-size:10px;color:var(--text);font-family:var(--font-mono);line-height:1.8">
+            <div>• Eastern Shelf of Midland Basin / Bend Arch trend</div>
+            <div>• Gentle regional dip west/northwest</div>
+            <div>• Anticlinal closures from Pennsylvanian Ouachita Orogeny</div>
+            <div>• Red River Uplift influences northern Wichita County</div>
+            <div>• Wichita Falls–Electra anticline is the dominant feature</div>
+            <div>• Fault-bounded traps common in Strawn and deeper intervals</div>
+          </div>
+        </div>
+        <div class="card" style="border-left:3px solid var(--cyan)">
+          <div style="font-size:12px;font-weight:700;margin-bottom:6px">Quick Economics by Formation</div>
+          <div style="font-size:10px;color:var(--text-dim);font-family:var(--font-mono);margin-bottom:6px">Typical well costs for N. Central TX conventional</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px">
+            ${[
+              ["Cisco/Gunsight", "$200–400K", "700–1,900 ft"],
+              ["Canyon/Caddo", "$350–600K", "3,000–4,800 ft"],
+              ["Strawn", "$400–700K", "3,500–5,500 ft"],
+              ["Bend/Ellenburger", "$600K–1.2M", "4,500–7,000 ft"],
+            ].map(([fm, cost, depth]) => `
+              <div style="background:var(--bg-input);border-radius:6px;padding:8px">
+                <div style="font-size:10px;font-weight:600;color:var(--text);margin-bottom:2px">${fm}</div>
+                <div style="font-size:11px;font-weight:700;color:var(--green);font-family:var(--font-mono)">${cost}</div>
+                <div style="font-size:9px;color:var(--text-muted);font-family:var(--font-mono)">${depth}</div>
+              </div>
+            `).join("")}
+          </div>
+        </div>` : ""}
+      </div>
+    </div>
+  `;
+}
+
 // ============ INIT ============
 async function init() {
   // Try Supabase first
@@ -2075,11 +2241,35 @@ async function init() {
     } else {
       state.wells = generateWells(state.basin);
     }
+    // Fetch data freshness (non-blocking)
+    fetchDataFreshness();
   } else {
     state.wells = generateWells(state.basin);
   }
   
   render();
+}
+
+async function fetchDataFreshness() {
+  try {
+    // Get last updated_at
+    const r = await supabaseClient
+      .from("ps_wells")
+      .select("updated_at")
+      .order("updated_at", { ascending: false })
+      .limit(1);
+    if (r.data && r.data.length > 0) {
+      const d = new Date(r.data[0].updated_at);
+      state.lastRefreshDate = d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+    }
+    // Get total count
+    const { count } = await supabaseClient
+      .from("ps_wells")
+      .select("*", { count: "exact", head: true });
+    if (count) state.totalWellCount = count.toLocaleString();
+    // Re-render stats bar
+    render();
+  } catch (e) { console.log("Freshness check:", e.message); }
 }
 
 init();

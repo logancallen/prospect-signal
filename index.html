@@ -435,6 +435,7 @@ let state = {
 
 let map = null;
 let tileLayer = null;
+let labelsLayer = null; // Transparent labels overlay — always on top of basemap
 let markerGroup = null;
 let heatLayer = null;
 let prospectPinLayer = null;
@@ -836,6 +837,13 @@ function initMap() {
   
   const s = MAP_STYLES[state.mapStyle];
   tileLayer = L.tileLayer(s.url, { maxZoom: s.maxZoom, attribution: s.attr }).addTo(map);
+  // Labels overlay: city names, roads, county boundaries on top of satellite/any basemap
+  // Only needed for satellite and dark modes (topo and streets already have labels)
+  if (state.mapStyle === 'satellite' || state.mapStyle === 'dark' || state.mapStyle.startsWith('mb-')) {
+    labelsLayer = L.tileLayer('https://{s}.basemaps.cartocdn.com/light_only_labels/{z}/{x}/{y}{r}.png', {
+      maxZoom: 20, attribution: '', pane: 'overlayPane', opacity: 0.9
+    }).addTo(map);
+  }
   markerGroup = L.markerClusterGroup({
     maxClusterRadius: 50,
     spiderfyOnMaxZoom: true,
@@ -900,6 +908,7 @@ function switchMapStyle(key) {
   state.mapStyle = key;
   if (!map || !tileLayer) return;
   map.removeLayer(tileLayer);
+  if (labelsLayer) { map.removeLayer(labelsLayer); labelsLayer = null; }
   
   let s;
   if (key.startsWith("mb-") && state.mapboxToken) {
@@ -910,6 +919,14 @@ function switchMapStyle(key) {
   } else {
     s = MAP_STYLES[key] || MAP_STYLES.satellite;
     tileLayer = L.tileLayer(s.url, { maxZoom: s.maxZoom, attribution: s.attr }).addTo(map);
+  }
+  
+  // Add labels overlay for styles that don't have built-in labels
+  const needsLabels = key === 'satellite' || key === 'dark' || key.startsWith('mb-satellite') || key.startsWith('mb-dark');
+  if (needsLabels) {
+    labelsLayer = L.tileLayer('https://{s}.basemaps.cartocdn.com/light_only_labels/{z}/{x}/{y}{r}.png', {
+      maxZoom: 20, attribution: '', pane: 'overlayPane', opacity: 0.9
+    }).addTo(map);
   }
   
   document.querySelectorAll(".map-style-btn").forEach(b => b.classList.toggle("active", b.dataset.key === key));
@@ -1675,15 +1692,6 @@ Where areaIndex is the 0-based index into the TOP 15 areas list above. Select th
       renderProspectPins();
       if (btn) btn.innerHTML = `✅ ${state.aiProspects.length} Prospects Found`;
       btn.style.background = 'linear-gradient(135deg, var(--green), #1a8a5a)';
-      // Inject Focus Prospects button if not already present
-      if (!document.getElementById('prospect-focus-btn') && btn) {
-        const focusBtn = document.createElement('button');
-        focusBtn.id = 'prospect-focus-btn';
-        focusBtn.onclick = toggleProspectFocus;
-        focusBtn.style.cssText = 'font-size:10px;font-family:var(--font-mono);background:rgba(34,211,238,0.15);border:1px solid rgba(34,211,238,0.3);color:var(--cyan);padding:5px 8px;border-radius:4px;cursor:pointer;font-weight:600;white-space:nowrap';
-        focusBtn.textContent = '◆ Focus Prospects';
-        btn.parentElement.insertBefore(focusBtn, btn.nextSibling);
-      }
       // Insert prospect results panel without destroying the map
       const dashboard = document.getElementById('basin-dashboard');
       if (dashboard) {
@@ -1749,7 +1757,7 @@ function renderProspectResultsPanel() {
             <div style="font-size:10px;color:var(--text-dim);font-family:var(--font-mono)">Top ${state.aiProspects.length} drilling opportunities ranked by geological confidence</div>
           </div>
         </div>
-        <button onclick="state.aiProspects=[];state.prospectFocus=false;var fb=document.getElementById('prospect-focus-btn');if(fb)fb.remove();var pp=document.getElementById('prospect-results-panel');if(pp)pp.innerHTML='';if(markerGroup&&map&&!map.hasLayer(markerGroup))map.addLayer(markerGroup);if(map)renderMapLayers();render()" style="font-size:10px;font-family:var(--font-mono);background:var(--bg-input);border:1px solid var(--border);color:var(--text-dim);padding:4px 10px;border-radius:4px;cursor:pointer">Clear</button>
+        <button onclick="state.aiProspects=[];state.prospectFocus=false;var pp=document.getElementById('prospect-results-panel');if(pp)pp.innerHTML='';if(markerGroup&&map&&!map.hasLayer(markerGroup))map.addLayer(markerGroup);if(map)renderMapLayers();render()" style="font-size:10px;font-family:var(--font-mono);background:var(--bg-input);border:1px solid var(--border);color:var(--text-dim);padding:4px 10px;border-radius:4px;cursor:pointer">Clear</button>
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
         ${prospectCards}

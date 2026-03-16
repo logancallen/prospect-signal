@@ -284,11 +284,11 @@ async function loadSupabaseWells(basin) {
   if (!supabaseClient || dataSource !== "supabase") return null;
   
   const isNCTX = basin.startsWith("N. Central");
-  if (!isNCTX) return null; // Only N. Central TX has real data for now
+  if (!isNCTX) return null;
   
   const targetCounties = ["ARCHER","BAYLOR","CLAY","FOARD","HARDEMAN","JACK","KNOX","MONTAGUE","WICHITA","WILBARGER","YOUNG","THROCKMORTON"];
+  const targetDistricts = ["09","9","7B"]; // CRITICAL: filters out Permian Basin (Dist 13) and other contamination
   
-  // Paginate — load wells with production data first (fast), optionally all
   let allData = [];
   let offset = 0;
   const pageSize = 10000;
@@ -299,9 +299,9 @@ async function loadSupabaseWells(basin) {
       .from("ps_wells")
       .select("*")
       .in("county_name", targetCounties)
+      .in("district", targetDistricts)
       .not("latitude", "is", null);
     
-    // By default only load wells that have production data (much faster)
     if (!loadAll) {
       query = query.gt("cum_oil", 0);
     }
@@ -314,19 +314,26 @@ async function loadSupabaseWells(basin) {
   }
   
   if (allData.length === 0) return null;
-  console.log(`Loaded ${allData.length} wells from Supabase`);
+  console.log(`Loaded ${allData.length} wells from Supabase (Districts ${targetDistricts.join(',')} only)`);
   
-  // Map Supabase records to app well format
   return allData.map(w => {
     const statusMap = { "ACTIVE": "producing", "INACTIVE": "shut-in", "PLUGGED": "plugged", "SHUT-IN": "shut-in", "NEW": "producing" };
     const ipRaw = parseFloat(w.ip_oil) || 0;
     const cumRaw = parseFloat(w.cum_oil) || 0;
+    // Extract formation from field_name parenthetical: "FENNELL (CISCO REEF)" -> "Cisco Reef"
+    let formation = w.formation || "Unknown";
+    if (formation === "Unknown" && w.field_name) {
+      const parenMatch = w.field_name.match(/\(([^)]+)\)/);
+      formation = parenMatch ? parenMatch[1].replace(/,?\s*(UP\.|LO\.|MID\.|UPPER|LOWER|MIDDLE)/gi, '').trim() : w.field_name;
+      formation = formation.replace(/\w\S*/g, t => t.charAt(0).toUpperCase() + t.substr(1).toLowerCase());
+    }
     return {
       id: w.api_number,
       lng: parseFloat(w.longitude) || -98.75 + (Math.random() - 0.5) * 0.5,
       lat: parseFloat(w.latitude) || 33.75 + (Math.random() - 0.5) * 0.3,
       status: statusMap[w.well_status] || "shut-in",
-      formation: w.formation || w.field_name || "Unknown",
+      formation: formation,
+      fieldName: w.field_name || "Unknown",
       ip: ipRaw > 0 ? Math.round(ipRaw / 30) : 0,
       depth: w.total_depth || 0,
       year: w.completion_date ? new Date(w.completion_date).getFullYear() : (w.last_prod_year || 0),
@@ -354,6 +361,7 @@ async function loadSupabaseProduction(leaseNumber, wellType) {
     .from("ps_production_monthly")
     .select("*")
     .eq("lease_number", leaseNumber)
+    .in("district", ["09","9","7B"])
     .order("report_year", { ascending: true })
     .order("report_month", { ascending: true });
   
@@ -422,6 +430,7 @@ let state = {
   compareResult: null, // AI comparison output
   comparing: false, // loading state
   compareMode: false, // when true, clicking wells adds to compare list
+  prospectFocus: false, // when true, hides well clusters and shows only prospect pins
 };
 
 let map = null;
@@ -1164,7 +1173,7 @@ function handleAIKeydown(e) {
 // ============ RENDERING ============
 async function setBasin(b) {
   state.basin = b; state.selectedWell = null; state.filterStatus = "all"; state.filterFormation = "all"; state.filterOperator = "all"; state.filterCounty = "all"; state.filterDepth = "all";
-  state.compareWells = []; state.compareResult = null; state.comparing = false; state.compareMode = false;
+  state.compareWells = []; state.compareResult = null; state.comparing = false; state.compareMode = false; state.prospectFocus = false;
   if (dataSource === "supabase") {
     const realWells = await loadSupabaseWells(b);
     state.wells = (realWells && realWells.length > 0) ? realWells : generateWells(b);
@@ -1341,6 +1350,7 @@ function renderMapTab(el, wells, info) {
             <button class="map-mode-btn map-style-btn ${state.mapMode==='opportunity'?'active':''}" data-mode="opportunity" onclick="setMapMode('opportunity')" style="${state.mapMode==='opportunity'?'color:var(--cyan);border-color:var(--cyan)':''}">◉ Opportunity</button>
             <div style="border-top:1px solid var(--border);margin:2px 0"></div>
             <button id="ai-prospect-btn" onclick="generateAIProspects()" style="font-size:10px;font-family:var(--font-mono);background:linear-gradient(135deg,var(--accent),#c97b1c);border:none;color:#0a0e14;padding:6px 8px;border-radius:4px;cursor:pointer;font-weight:700;white-space:nowrap">${state.aiProspects.length > 0 ? '✅ ' + state.aiProspects.length + ' Prospects' : '🧠 AI Find Prospects'}</button>
+            ${state.aiProspects.length > 0 ? `<button id="prospect-focus-btn" onclick="toggleProspectFocus()" style="font-size:10px;font-family:var(--font-mono);background:${state.prospectFocus?'var(--cyan)':'rgba(34,211,238,0.15)'};border:1px solid rgba(34,211,238,0.3);color:${state.prospectFocus?'#0a0e14':'var(--cyan)'};padding:5px 8px;border-radius:4px;cursor:pointer;font-weight:600;white-space:nowrap">${state.prospectFocus ? '◆ Prospects Only' : '◆ Focus Prospects'}</button>` : ''}
             <button onclick="toggleCompareMode()" style="font-size:10px;font-family:var(--font-mono);background:${state.compareMode?'var(--blue)':'rgba(96,165,250,0.15)'};border:1px solid ${state.compareMode?'var(--blue)':'rgba(96,165,250,0.3)'};color:${state.compareMode?'#fff':'var(--blue)'};padding:6px 8px;border-radius:4px;cursor:pointer;font-weight:700;white-space:nowrap">${state.compareMode ? '✓ Compare ON ('+state.compareWells.length+'/3)' : '⟨⟩ Compare Wells'}</button>
           </div>
           <div class="map-overlay map-legend">
@@ -1473,18 +1483,23 @@ function renderProspectPins() {
   prospectPinLayer = L.layerGroup();
   
   state.aiProspects.forEach((p, i) => {
+    // Distinct design: cyan diamond with white number — NOT gold circle like clusters
+    const scoreColor = p.score >= 80 ? '#22d3ee' : p.score >= 60 ? '#60a5fa' : '#c084fc';
     const icon = L.divIcon({
-      html: `<div style="background:linear-gradient(135deg,#e8a838,#c97b1c);color:#0a0e14;border-radius:50%;width:32px;height:32px;display:flex;align-items:center;justify-content:center;font-weight:900;font-size:14px;font-family:var(--font-mono);border:3px solid rgba(232,168,56,0.5);box-shadow:0 0 20px rgba(232,168,56,0.4);cursor:pointer">${i + 1}</div>`,
+      html: `<div style="position:relative;width:38px;height:38px">
+        <div style="position:absolute;inset:0;background:${scoreColor};transform:rotate(45deg);border-radius:6px;border:2px solid rgba(255,255,255,0.6);box-shadow:0 0 16px ${scoreColor}80,0 0 32px ${scoreColor}40"></div>
+        <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-weight:900;font-size:15px;font-family:var(--font-mono);color:#0a0e14;text-shadow:0 0 2px rgba(255,255,255,0.5);cursor:pointer">${i + 1}</div>
+      </div>`,
       className: '',
-      iconSize: L.point(32, 32),
-      iconAnchor: L.point(16, 16)
+      iconSize: L.point(38, 38),
+      iconAnchor: L.point(19, 19)
     });
     
-    const marker = L.marker([p.lat, p.lng], { icon });
+    const marker = L.marker([p.lat, p.lng], { icon, zIndexOffset: 1000 });
     
     marker.bindPopup(`
       <div style="font-family:var(--font-mono);font-size:11px;line-height:1.7;max-width:320px;color:#e2e8f0">
-        <div style="font-weight:700;color:#e8a838;font-size:13px;margin-bottom:6px">PROSPECT #${i + 1}: ${p.name}</div>
+        <div style="font-weight:700;color:${scoreColor};font-size:13px;margin-bottom:6px">◆ PROSPECT #${i + 1}: ${p.name}</div>
         <div style="font-size:10px;color:#64748b;margin-bottom:8px">${p.lat.toFixed(4)}°N, ${Math.abs(p.lng).toFixed(4)}°W</div>
         <div style="border-top:1px solid #1a2332;padding-top:8px;margin-bottom:6px">
           <span style="color:#34d399;font-weight:600">Score: ${p.score}/100</span> · 
@@ -1502,6 +1517,32 @@ function renderProspectPins() {
   });
   
   prospectPinLayer.addTo(map);
+}
+
+function toggleProspectFocus() {
+  state.prospectFocus = !state.prospectFocus;
+  if (!map || !markerGroup) return;
+  if (state.prospectFocus) {
+    // Hide well clusters, show only prospect pins
+    if (map.hasLayer(markerGroup)) map.removeLayer(markerGroup);
+    if (heatLayer && map.hasLayer(heatLayer)) map.removeLayer(heatLayer);
+    // Zoom to fit all prospect pins
+    if (state.aiProspects.length > 0) {
+      const bounds = L.latLngBounds(state.aiProspects.map(p => [p.lat, p.lng]));
+      map.fitBounds(bounds, { padding: [40, 40] });
+    }
+  } else {
+    // Restore wells
+    if (!map.hasLayer(markerGroup)) map.addLayer(markerGroup);
+    renderMapLayers();
+  }
+  // Update the toggle button
+  const btn = document.getElementById('prospect-focus-btn');
+  if (btn) {
+    btn.style.background = state.prospectFocus ? 'var(--cyan)' : 'rgba(34,211,238,0.15)';
+    btn.style.color = state.prospectFocus ? '#0a0e14' : 'var(--cyan)';
+    btn.textContent = state.prospectFocus ? '◆ Prospects Only — tap to show all' : '◆ Focus Prospects';
+  }
 }
 
 async function generateAIProspects() {
@@ -1670,7 +1711,7 @@ function renderProspectResultsPanel() {
       return `
         <div style="${cardStyle};cursor:pointer;transition:border-color 0.2s" onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor='var(--border)'" onclick="if(map){map.setView([${p.lat},${p.lng}],12)}">
           <div style="display:flex;align-items:flex-start;gap:12px">
-            <div style="background:linear-gradient(135deg,#e8a838,#c97b1c);color:#0a0e14;border-radius:50%;width:36px;height:36px;display:flex;align-items:center;justify-content:center;font-weight:900;font-size:16px;font-family:var(--font-mono);flex-shrink:0">${i + 1}</div>
+            <div style="position:relative;width:36px;height:36px;flex-shrink:0"><div style="position:absolute;inset:2px;background:${scoreColor};transform:rotate(45deg);border-radius:5px"></div><div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-weight:900;font-size:15px;font-family:var(--font-mono);color:#0a0e14">${i + 1}</div></div>
             <div style="flex:1;min-width:0">
               <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
                 <div style="font-size:13px;font-weight:700;color:var(--accent);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${p.name}</div>
@@ -1699,7 +1740,7 @@ function renderProspectResultsPanel() {
             <div style="font-size:10px;color:var(--text-dim);font-family:var(--font-mono)">Top ${state.aiProspects.length} drilling opportunities ranked by geological confidence</div>
           </div>
         </div>
-        <button onclick="state.aiProspects=[];var pp=document.getElementById('prospect-results-panel');if(pp)pp.innerHTML='';if(map)renderMapLayers()" style="font-size:10px;font-family:var(--font-mono);background:var(--bg-input);border:1px solid var(--border);color:var(--text-dim);padding:4px 10px;border-radius:4px;cursor:pointer">Clear</button>
+        <button onclick="state.aiProspects=[];state.prospectFocus=false;var pp=document.getElementById('prospect-results-panel');if(pp)pp.innerHTML='';if(markerGroup&&map&&!map.hasLayer(markerGroup))map.addLayer(markerGroup);if(map)renderMapLayers();render()" style="font-size:10px;font-family:var(--font-mono);background:var(--bg-input);border:1px solid var(--border);color:var(--text-dim);padding:4px 10px;border-radius:4px;cursor:pointer">Clear</button>
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
         ${prospectCards}
@@ -3217,22 +3258,21 @@ async function init() {
 
 async function fetchDataFreshness() {
   try {
-    // Get last updated_at
     const r = await supabaseClient
       .from("ps_wells")
       .select("updated_at")
+      .in("district", ["09","9","7B"])
       .order("updated_at", { ascending: false })
       .limit(1);
     if (r.data && r.data.length > 0) {
       const d = new Date(r.data[0].updated_at);
       state.lastRefreshDate = d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
     }
-    // Get total count
     const { count } = await supabaseClient
       .from("ps_wells")
-      .select("*", { count: "exact", head: true });
+      .select("*", { count: "exact", head: true })
+      .in("district", ["09","9","7B"]);
     if (count) state.totalWellCount = count.toLocaleString();
-    // Re-render stats bar
     render();
   } catch (e) { console.log("Freshness check:", e.message); }
 }

@@ -1675,6 +1675,15 @@ Where areaIndex is the 0-based index into the TOP 15 areas list above. Select th
       renderProspectPins();
       if (btn) btn.innerHTML = `✅ ${state.aiProspects.length} Prospects Found`;
       btn.style.background = 'linear-gradient(135deg, var(--green), #1a8a5a)';
+      // Inject Focus Prospects button if not already present
+      if (!document.getElementById('prospect-focus-btn') && btn) {
+        const focusBtn = document.createElement('button');
+        focusBtn.id = 'prospect-focus-btn';
+        focusBtn.onclick = toggleProspectFocus;
+        focusBtn.style.cssText = 'font-size:10px;font-family:var(--font-mono);background:rgba(34,211,238,0.15);border:1px solid rgba(34,211,238,0.3);color:var(--cyan);padding:5px 8px;border-radius:4px;cursor:pointer;font-weight:600;white-space:nowrap';
+        focusBtn.textContent = '◆ Focus Prospects';
+        btn.parentElement.insertBefore(focusBtn, btn.nextSibling);
+      }
       // Insert prospect results panel without destroying the map
       const dashboard = document.getElementById('basin-dashboard');
       if (dashboard) {
@@ -1740,7 +1749,7 @@ function renderProspectResultsPanel() {
             <div style="font-size:10px;color:var(--text-dim);font-family:var(--font-mono)">Top ${state.aiProspects.length} drilling opportunities ranked by geological confidence</div>
           </div>
         </div>
-        <button onclick="state.aiProspects=[];state.prospectFocus=false;var pp=document.getElementById('prospect-results-panel');if(pp)pp.innerHTML='';if(markerGroup&&map&&!map.hasLayer(markerGroup))map.addLayer(markerGroup);if(map)renderMapLayers();render()" style="font-size:10px;font-family:var(--font-mono);background:var(--bg-input);border:1px solid var(--border);color:var(--text-dim);padding:4px 10px;border-radius:4px;cursor:pointer">Clear</button>
+        <button onclick="state.aiProspects=[];state.prospectFocus=false;var fb=document.getElementById('prospect-focus-btn');if(fb)fb.remove();var pp=document.getElementById('prospect-results-panel');if(pp)pp.innerHTML='';if(markerGroup&&map&&!map.hasLayer(markerGroup))map.addLayer(markerGroup);if(map)renderMapLayers();render()" style="font-size:10px;font-family:var(--font-mono);background:var(--bg-input);border:1px solid var(--border);color:var(--text-dim);padding:4px 10px;border-radius:4px;cursor:pointer">Clear</button>
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
         ${prospectCards}

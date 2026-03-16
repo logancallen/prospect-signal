@@ -287,7 +287,8 @@ async function loadSupabaseWells(basin) {
   if (!isNCTX) return null;
   
   const targetCounties = ["ARCHER","BAYLOR","CLAY","FOARD","HARDEMAN","JACK","KNOX","MONTAGUE","WICHITA","WILBARGER","YOUNG","THROCKMORTON"];
-  const targetDistricts = ["09","9","7B"]; // CRITICAL: filters out Permian Basin (Dist 13) and other contamination
+  // Include District 09, 7B (PDQ data) AND NULL district (SODA API wells)
+  // Exclude District 13 (Permian Basin contamination) and other non-NCTX districts
   
   let allData = [];
   let offset = 0;
@@ -299,7 +300,7 @@ async function loadSupabaseWells(basin) {
       .from("ps_wells")
       .select("*")
       .in("county_name", targetCounties)
-      .in("district", targetDistricts)
+      .or("district.in.(09,9,7B),district.is.null")
       .not("latitude", "is", null);
     
     if (!loadAll) {
@@ -314,7 +315,7 @@ async function loadSupabaseWells(basin) {
   }
   
   if (allData.length === 0) return null;
-  console.log(`Loaded ${allData.length} wells from Supabase (Districts ${targetDistricts.join(',')} only)`);
+  console.log(`Loaded ${allData.length} wells from Supabase (NCTX Districts 09/7B + SODA wells)`);
   
   return allData.map(w => {
     const statusMap = { "ACTIVE": "producing", "INACTIVE": "shut-in", "PLUGGED": "plugged", "SHUT-IN": "shut-in", "NEW": "producing" };
@@ -3278,7 +3279,7 @@ async function fetchDataFreshness() {
     const r = await supabaseClient
       .from("ps_wells")
       .select("updated_at")
-      .in("district", ["09","9","7B"])
+      .or("district.in.(09,9,7B),district.is.null")
       .order("updated_at", { ascending: false })
       .limit(1);
     if (r.data && r.data.length > 0) {
@@ -3288,7 +3289,7 @@ async function fetchDataFreshness() {
     const { count } = await supabaseClient
       .from("ps_wells")
       .select("*", { count: "exact", head: true })
-      .in("district", ["09","9","7B"]);
+      .or("district.in.(09,9,7B),district.is.null");
     if (count) state.totalWellCount = count.toLocaleString();
     render();
   } catch (e) { console.log("Freshness check:", e.message); }
